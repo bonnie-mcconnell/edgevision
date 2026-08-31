@@ -3,8 +3,10 @@ __pycache__/
 .venv/
 models/*.onnx
 dump.rdb
+
 results/*
+!results/benchmark.csv
 !results/benchmark_real_model.csv
 !results/examples/
-!results/benchmark.csv
+
 models/*.pt
