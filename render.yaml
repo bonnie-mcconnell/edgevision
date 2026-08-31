@@ -1,0 +1,35 @@
+# Render Blueprint - deploys the HOG backend + a managed Redis instance.
+# https://render.com/docs/blueprint-spec (verify field names there; Render's
+# schema does evolve, this is a best-effort starting point as of writing).
+#
+# Usage: push this repo to GitHub, then on Render: New -> Blueprint,
+# connect the repo, Render reads this file and provisions both services.
+#
+# No VIDEO_SOURCE is set deliberately - there's no camera on a cloud server,
+# so /ws/detections has nothing to stream, but /health, /docs,
+# /alerts/recent, and /benchmark/results all work fine without one.
+
+services:
+  - type: web
+    name: edgevision
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DETECTOR_BACKEND
+        value: hog
+      - key: REDIS_HOST
+        fromService:
+          type: keyvalue
+          name: edgevision-redis
+          property: host
+      - key: REDIS_PORT
+        fromService:
+          type: keyvalue
+          name: edgevision-redis
+          property: port
+
+  - type: keyvalue
+    name: edgevision-redis
+    plan: free
+    ipAllowList: []

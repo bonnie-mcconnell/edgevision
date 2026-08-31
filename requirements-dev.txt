@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# Test suite (tests/)
+pytest
+fakeredis
+
+# Dev-only demo viewer (scripts/view_stream.py) - not part of the app
+websockets
+rich
