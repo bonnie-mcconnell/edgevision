@@ -1,0 +1,16 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+opencv-python-headless==4.13.0.92
+numpy==2.4.4
+redis==8.1.0
+onnx==1.22.0
+onnxruntime==1.24.4
+
+# Optional, only needed if you export a real YOLOv8n model:
+# ultralytics==8.4.123
+# ultralytics depends on opencv-python (not opencv-python-headless), so
+# installing it will pull in a second GUI-enabled cv2 build alongside the one
+# above. These two packages can't safely coexist installed together (their
+# files can clash depending on install order). After exporting your model,
+# either uninstall opencv-python and reinstall opencv-python-headless, or
+# just do the export in a separate throwaway venv instead of this project's.

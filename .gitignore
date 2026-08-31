@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+models/*.onnx
+dump.rdb
+results/*
+!results/benchmark_real_model.csv
+!results/examples/
+!results/benchmark.csv
+models/*.pt
