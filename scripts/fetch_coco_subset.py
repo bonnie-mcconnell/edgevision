@@ -19,7 +19,7 @@ import os
 
 
 # Which COCO classes to pull. 
-CLASSES = ["person", "car", "truck", "bicycle", "dog"]
+CLASSES = ["person"]
 
 NUM_IMAGES = 40       
 SPLIT = "validation"     # val2017

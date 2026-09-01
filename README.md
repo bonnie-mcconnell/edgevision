@@ -46,6 +46,14 @@ Ran the exported yolov8n.onnx through `OnnxPersonDetector` against two standard 
 
 This isn't a formal precision/recall eval against a labeled dataset (that's still a TODO), but it's some evidence the pipeline actually detects real people correctly end-to-end.
 
+Accuracy check with multiple confidence thresholds:
+
+conf	Precision	Recall	tp	fp	fn
+0.25	0.797	0.615	110	28	69
+0.40	0.877	0.559	100	14	79
+0.50	0.917	0.492	88	8	91
+0.60	0.974	0.413	74	2	105
+
 ### Tests
 
 `tests/` covers the pure-logic pieces that are cheap to test and easy to get subtly wrong: `Zone.overlaps_box` (all four separation cases plus edge-touching), NMS (suppression, survival, empty input), and `AlertManager`'s cooldown/dedup logic (via `fakeredis`, no real Redis needed to run the suite). `pip install pytest fakeredis && pytest tests/ -v`.

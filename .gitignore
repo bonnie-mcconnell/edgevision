@@ -9,4 +9,6 @@ results/*
 !results/benchmark_real_model.csv
 !results/examples/
 
+coco_subset/
+
 models/*.pt
