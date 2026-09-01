@@ -7,21 +7,23 @@ import csv
 import os
 
 import cv2
-import redis
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
+from contextlib import asynccontextmanager
 
 from app.alerts import AlertManager, Zone
-from app.detector import build_detector
+from app.dependencies import get_alert_manager, get_detector, get_redis_client
+from app.detector import HogPersonDetector, OnnxPersonDetector
 
-app = FastAPI(title="EdgeVision")
 
-redis_client = redis.Redis(
-    host=os.environ.get("REDIS_HOST", "localhost"),
-    port=int(os.environ.get("REDIS_PORT", 6379)),
-    decode_responses=True,
-)
-alert_manager = AlertManager(redis_client, cooldown_seconds=30)
-detector = build_detector()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    get_detector()
+    redis_client = get_redis_client()
+    redis_client.ping() # raises redis.ConnectionError immediately if Redis is unreachable
+    yield
+
+
+app = FastAPI(title="EdgeVision", lifespan=lifespan)
 
 # Example zone: middle third of a 640x480 frame.
 # TODO: In a real deployment this comes from a per-camera config, drawn by the user in a setup UI.
@@ -29,12 +31,12 @@ DEFAULT_ZONE = Zone(name="front_door", x1=200, y1=0, x2=440, y2=480)
 
 
 @app.get("/health")
-def health() -> dict:
+def health(detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector)) -> dict:
     return {"status": "ok", "detector_backend": type(detector).__name__}
 
 
 @app.get("/alerts/recent")
-def recent_alerts(limit: int = 20) -> dict:
+def recent_alerts(limit: int = 20, alert_manager: AlertManager = Depends(get_alert_manager)) -> dict:
     return {"alerts": alert_manager.recent_alerts(limit)}
 
 
@@ -49,7 +51,7 @@ def benchmark_results() -> dict:
 
 
 @app.websocket("/ws/detections")
-async def websocket_detections(websocket: WebSocket):
+async def websocket_detections(websocket: WebSocket, alert_manager: AlertManager = Depends(get_alert_manager), detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector)):
     """Streams detections+alerts. Needs VIDEO_SOURCE set to a webcam index or RTSP url."""
     await websocket.accept()
 
