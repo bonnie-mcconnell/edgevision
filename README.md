@@ -3,7 +3,10 @@
 Person detection + zone alerting for a security camera use case, with a benchmark comparing FP32 vs INT8 quantized inference on CPU.
 
 **Live:** [edgevision-mpll.onrender.com/health](https://edgevision-mpll.onrender.com/health) · [interactive API docs](https://edgevision-mpll.onrender.com/docs)
-(runs the HOG backend on Render's free tier, no camera attached, so `/ws/detections` has nothing to stream - see "Running it" below for testing detection with a real feed)
+(runs the HOG backend on Render's free tier, no camera attached, so `/ws/detections` has nothing to stream, see "Running it" below for testing detection with a real feed)
+
+![demo](results/demo.gif)
+*Live ONNX detection on a real street-scene clip with bounding boxes, per-detection confidence, and per-frame inference time. Full video: `results/video/street_annotated.mp4`, generated via `python -m scripts.test_video`.*
 
 Video frame arrives, a detector finds people, boxes get checked against a zone, and alerts get deduped through Redis before hitting a websocket. There's also a separate benchmark script for testing whether quantizing a model helps on CPU.
 

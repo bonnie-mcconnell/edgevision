@@ -20,7 +20,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-WS_URL = "ws://localhost:8000/ws/detections"
+WS_URL = "ws://localhost:8001/ws/detections"
 
 
 def build_table(data: dict) -> Table:
