@@ -1,13 +1,10 @@
-# Render Blueprint - deploys the HOG backend + a managed Redis instance.
-# https://render.com/docs/blueprint-spec (verify field names there; Render's
-# schema does evolve, this is a best-effort starting point as of writing).
-#
-# Usage: push this repo to GitHub, then on Render: New -> Blueprint,
-# connect the repo, Render reads this file and provisions both services.
-#
+# Render Blueprint - deploys the ONNX (YOLOv8n) backend + a managed Redis
+# instance. The Dockerfile's builder stage exports yolov8n.onnx at image
+# build time, so no manual model upload/volume mount is needed.
+
 # No VIDEO_SOURCE is set deliberately - there's no camera on a cloud server,
-# so /ws/detections has nothing to stream, but /health, /docs,
-# /alerts/recent, and /benchmark/results all work fine without one.
+# so /ws/detections has nothing to stream from, but /health, /docs, /live,
+# /demo/detect, /alerts/recent, and /benchmark/results all work without one.
 
 services:
   - type: web
@@ -17,7 +14,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: DETECTOR_BACKEND
-        value: hog
+        value: onnx
       - key: REDIS_HOST
         fromService:
           type: keyvalue
