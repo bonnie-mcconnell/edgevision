@@ -1,5 +1,6 @@
 import os
 
+import cv2
 import redis
 from fastapi import Depends
 from functools import lru_cache
@@ -28,3 +29,9 @@ def get_alert_manager(redis_client: redis.Redis = Depends(get_redis_client)) -> 
 @lru_cache
 def get_detector() -> HogPersonDetector | OnnxPersonDetector:
     return build_detector()
+
+
+def get_frame_source() -> cv2.VideoCapture:
+    source = os.environ.get("VIDEO_SOURCE", "0")
+    source = int(source) if source.isdigit() else source
+    return cv2.VideoCapture(source)
