@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import csv
 import os
+import base64
 
 import cv2
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 
 from app.alerts import AlertManager, Zone
-from app.dependencies import get_alert_manager, get_detector, get_redis_client
+from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
 from app.detector import HogPersonDetector, OnnxPersonDetector
 
 
@@ -35,6 +37,11 @@ def health(detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detect
     return {"status": "ok", "detector_backend": type(detector).__name__}
 
 
+@app.get("/live")
+def live_view() -> FileResponse:
+    return FileResponse("app/static/live.html")
+
+
 @app.get("/alerts/recent")
 def recent_alerts(limit: int = 20, alert_manager: AlertManager = Depends(get_alert_manager)) -> dict:
     return {"alerts": alert_manager.recent_alerts(limit)}
@@ -51,17 +58,19 @@ def benchmark_results() -> dict:
 
 
 @app.websocket("/ws/detections")
-async def websocket_detections(websocket: WebSocket, alert_manager: AlertManager = Depends(get_alert_manager), detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector)):
+async def websocket_detections(
+    websocket: WebSocket, 
+    include_frame: bool = False,
+    alert_manager: AlertManager = Depends(get_alert_manager), 
+    detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector), 
+    cap: cv2.VideoCapture = Depends(get_frame_source)
+    ):
     """Streams detections+alerts. Needs VIDEO_SOURCE set to a webcam index or RTSP url."""
     await websocket.accept()
 
-    source = os.environ.get("VIDEO_SOURCE", "0")
-    source = int(source) if source.isdigit() else source
-    cap = cv2.VideoCapture(source)
-
     try:
         if not cap.isOpened():
-            await websocket.send_json({"error": f"Could not open video source: {source}"})
+            await websocket.send_json({"error": f"Could not open video source"})
             return
 
         while True:
@@ -82,7 +91,7 @@ async def websocket_detections(websocket: WebSocket, alert_manager: AlertManager
                     if alert:
                         fired_alerts.append(alert.to_dict())
 
-            await websocket.send_json({
+            payload = {
                 "detections": [
                     {"label": d.label, "confidence": d.confidence,
                      "box": [d.x1, d.y1, d.x2, d.y2]}
@@ -90,7 +99,14 @@ async def websocket_detections(websocket: WebSocket, alert_manager: AlertManager
                 ],
                 "inference_ms": round(elapsed_s * 1000, 2),
                 "alerts": fired_alerts,
-            })
+            }
+
+            if include_frame:
+                ok_enc, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                if ok_enc:
+                    payload["frame"] = base64.b64encode(buffer.tobytes()).decode("utf-8")
+
+            await websocket.send_json(payload)
             await asyncio.sleep(0.01)  # yield control, don't peg the event loop
     except WebSocketDisconnect:
         pass

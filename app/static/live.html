@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>EdgeVision - live view</title>
+  <style>
+    body { background: #111; color: #eee; font-family: monospace; text-align: center; }
+    canvas { border: 2px solid #444; margin-top: 12px; }
+    #alert-banner {
+      font-size: 24px; font-weight: bold; color: #ff4444;
+      height: 32px; visibility: hidden;
+    }
+    #status { color: #888; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h2>EdgeVision - live detection view</h2>
+  <div id="alert-banner">ALERT FIRED</div>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <div id="status">connecting...</div>
+
+  <script>
+    // Keep in sync with DEFAULT_ZONE in app/main.py
+    const ZONE = { x1: 200, y1: 0, x2: 440, y2: 480 };
+
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const banner = document.getElementById("alert-banner");
+    const status = document.getElementById("status");
+
+    const wsUrl = `ws://${location.host}/ws/detections?include_frame=true`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => { status.textContent = "connected"; };
+    ws.onclose = () => { status.textContent = "disconnected"; };
+    ws.onerror = () => { status.textContent = "error - is the server running with a real webcam?"; };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      status.textContent = `${data.detections.length} detected | ${data.inference_ms}ms`;
+
+      if (!data.frame) {
+        return;
+      }
+
+      const img = new Image();
+      img.onload = () => {
+        // draw the actual camera frame first
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // draw the alert zone
+        ctx.strokeStyle = "yellow";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(ZONE.x1, ZONE.y1, ZONE.x2 - ZONE.x1, ZONE.y2 - ZONE.y1);
+
+        // draw each detection box
+        ctx.strokeStyle = "lime";
+        ctx.fillStyle = "lime";
+        ctx.font = "16px monospace";
+        for (const d of data.detections) {
+          const [x1, y1, x2, y2] = d.box;
+          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+          ctx.fillText(`${d.label} ${d.confidence.toFixed(2)}`, x1, Math.max(y1 - 6, 14));
+        }
+      };
+      img.src = "data:image/jpeg;base64," + data.frame;
+
+      // flash the alert banner briefly if one fired this frame
+      if (data.alerts && data.alerts.length > 0) {
+        banner.style.visibility = "visible";
+        setTimeout(() => { banner.style.visibility = "hidden"; }, 1500);
+      }
+    };
+  </script>
+</body>
+</html>
