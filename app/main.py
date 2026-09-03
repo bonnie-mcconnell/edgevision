@@ -8,13 +8,14 @@ import os
 import base64
 
 import cv2
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, UploadFile, File
+from fastapi.responses import FileResponse, Response
 from contextlib import asynccontextmanager
+import numpy as np
 
 from app.alerts import AlertManager, Zone
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
-from app.detector import HogPersonDetector, OnnxPersonDetector
+from app.detector import HogPersonDetector, OnnxPersonDetector, draw_detections
 
 
 @asynccontextmanager
@@ -55,6 +56,42 @@ def benchmark_results() -> dict:
         raise HTTPException(status_code=404, detail="No benchmark results yet. Run scripts/benchmark.py first.")
     with open(path) as f:
         return {"results": list(csv.DictReader(f))}
+
+
+@app.post("/demo/detect")
+async def demo_detect(
+    file: UploadFile = File(...),
+    format: str = "image", # or 'json'
+    detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector),
+):
+    """Post an image to this endpoint, get back detections as JSON or an annotated image."""
+    im_bytes = await file.read()
+    im_arr = np.frombuffer(im_bytes, dtype=np.uint8)
+    frame = cv2.imdecode(im_arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Could not decode image")
+
+    detections, elapsed = detector.detect(frame) 
+
+    if format == "json":
+        return {
+            "detections": [
+                {"label": d.label, "confidence": d.confidence,
+                 "box": [d.x1, d.y1, d.x2, d.y2]}
+                for d in detections
+            ],
+            "inference_ms": round(elapsed * 1000, 2),
+        }
+
+    frame = draw_detections(frame, detections)
+
+    ok_enc, buffer = cv2.imencode(".jpg", frame)
+    if not ok_enc:
+        raise HTTPException(status_code=500, detail="Could not encode result image")
+    
+    return Response(content=buffer.tobytes(), media_type="image/jpeg")
+
+
 
 
 @app.websocket("/ws/detections")

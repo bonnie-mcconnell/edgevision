@@ -21,6 +21,20 @@ class Detection:
     y2: float
 
 
+def draw_detections(frame: np.ndarray, detections: list[Detection]) -> np.ndarray:
+    """Draws a box + label/confidence text for each detection directly onto
+    frame (mutates it in place, same object is also returned for convenience
+    when chaining). Shared by scripts/test_video.py, the /demo/detect route,
+    and anywhere else that needs the same visual style, so it only needs to
+    be changed in one place."""
+    for d in detections:
+        x1, y1, x2, y2 = int(d.x1), int(d.y1), int(d.x2), int(d.y2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        cv2.putText(frame, f"{d.label} {d.confidence:.2f}", (x1, max(y1 - 10, 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    return frame
+
+
 class HogPersonDetector:
     """Classical HOG+SVM detector. No download required."""
 

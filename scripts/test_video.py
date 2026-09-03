@@ -2,7 +2,7 @@ import os
 import time
 import cv2
 
-from app.detector import OnnxPersonDetector
+from app.detector import OnnxPersonDetector, draw_detections
 
 
 VIDEO_SOURCE = "test_footage/street.mp4"
@@ -45,12 +45,8 @@ def main() -> None:
             frame_idx += 1
 
             detections, elapsed = detector.detect(frame)
-            for d in detections:
-                x1, y1, x2, y2 = int(d.x1), int(d.y1), int(d.x2), int(d.y2)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                cv2.putText(frame, f"person {d.confidence:.2f}", (x1, max(y1 - 10, 20)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
+            frame = draw_detections(frame, detections)
+            
             cv2.putText(frame, f"{len(detections)} detected  |  {elapsed * 1000:.0f}ms",
                         (20, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 

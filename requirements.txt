@@ -5,12 +5,15 @@ numpy==2.4.4
 redis==8.1.0
 onnx==1.22.0
 onnxruntime==1.24.4
-
-# Optional, only needed if you export a real YOLOv8n model:
+python-multipart==0.0.20  # needed for UploadFile/File(...) - POST /demo/detect
+ 
+# Optional, only needed if you want to export a real YOLOv8n model locally:
 # ultralytics==8.4.123
-# ultralytics depends on opencv-python (not opencv-python-headless), so
+# ultralytics depends on opencv-python so
 # installing it will pull in a second GUI-enabled cv2 build alongside the one
 # above. These two packages can't safely coexist installed together (their
-# files can clash depending on install order). After exporting your model,
-# either uninstall opencv-python and reinstall opencv-python-headless, or
-# just do the export in a separate throwaway venv instead of this project's.
+# files can clash depending on install order). After exporting the model
+# uninstall opencv-python and reinstall opencv-python-headless or
+# do the export in a separate throwaway venv instead of this project's.
+# The Docker image handles this automatically via a separate multi-stage
+# builder stage.
