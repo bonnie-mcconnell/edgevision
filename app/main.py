@@ -6,6 +6,7 @@ import asyncio
 import csv
 import os
 import base64
+import time
 
 import cv2
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, UploadFile, File
@@ -43,6 +44,11 @@ def live_view() -> FileResponse:
     return FileResponse("app/static/live.html")
 
 
+@app.get("/demo")
+def demo_view() -> FileResponse:
+    return FileResponse("app/static/demo.html")
+
+
 @app.get("/alerts/recent")
 def recent_alerts(limit: int = 20, alert_manager: AlertManager = Depends(get_alert_manager)) -> dict:
     return {"alerts": alert_manager.recent_alerts(limit)}
@@ -65,13 +71,21 @@ async def demo_detect(
     detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector),
 ):
     """Post an image to this endpoint, get back detections as JSON or an annotated image."""
+    t0 = time.perf_counter()
     im_bytes = await file.read()
     im_arr = np.frombuffer(im_bytes, dtype=np.uint8)
     frame = cv2.imdecode(im_arr, cv2.IMREAD_COLOR)
     if frame is None:
         raise HTTPException(status_code=400, detail="Could not decode image")
+    t1 = time.perf_counter()
 
-    detections, elapsed = detector.detect(frame) 
+    detections, detect_elapsed = detector.detect(frame) 
+    t2 = time.perf_counter()
+
+    timing = {
+        "decode_ms": round((t1-t0) * 1000, 2),
+        "detect_ms": round(detect_elapsed * 1000, 2)
+    }
 
     if format == "json":
         return {
@@ -80,7 +94,7 @@ async def demo_detect(
                  "box": [d.x1, d.y1, d.x2, d.y2]}
                 for d in detections
             ],
-            "inference_ms": round(elapsed * 1000, 2),
+            "timing": timing,
         }
 
     frame = draw_detections(frame, detections)
@@ -88,7 +102,11 @@ async def demo_detect(
     ok_enc, buffer = cv2.imencode(".jpg", frame)
     if not ok_enc:
         raise HTTPException(status_code=500, detail="Could not encode result image")
-    
+
+    t3 = time.perf_counter()
+    timing["draw_and_encode_ms"] = round((t3-t2) * 1000, 2)
+
+    print(f"/demo/detect timing: {timing}") # visible server side even for image response, which doesn't have JSON body
     return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
 
@@ -111,15 +129,18 @@ async def websocket_detections(
             return
 
         while True:
+            t0 = time.perf_counter()
             ok, frame = cap.read()
             if not ok:
                 break
+            t1 = time.perf_counter()
 
             try:
                 detections, elapsed_s = detector.detect(frame)
             except Exception as e:
                 print(f"detector error on frame, skipping: {e}")
                 continue
+            t2 = time.perf_counter()
 
             fired_alerts = []
             for det in detections:
@@ -136,12 +157,18 @@ async def websocket_detections(
                 ],
                 "inference_ms": round(elapsed_s * 1000, 2),
                 "alerts": fired_alerts,
+                "timing": {       # inference_ms kept for backward compat with existing consumers, timing gives the fuller breakdown
+                    "read_ms": round((t1 - t0) * 1000, 2),
+                    "detect_ms": round(elapsed_s * 1000, 2),
+                },
             }
 
             if include_frame:
+                t3 = time.perf_counter()
                 ok_enc, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
                 if ok_enc:
                     payload["frame"] = base64.b64encode(buffer.tobytes()).decode("utf-8")
+                payload["timing"]["encode_ms"] = round((time.perf_counter() - t3) * 1000, 2)
 
             await websocket.send_json(payload)
             await asyncio.sleep(0.01)  # yield control, don't peg the event loop

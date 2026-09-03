@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>EdgeVision - try it</title>
+  <style>
+    body { background: #111; color: #eee; font-family: monospace; text-align: center; padding-top: 20px; }
+    #result { border: 2px solid #444; margin-top: 16px; max-width: 90%; display: none; }
+    #status { color: #888; margin-top: 8px; }
+    button, input { font-family: monospace; font-size: 14px; padding: 6px 10px; }
+  </style>
+</head>
+<body>
+  <h2>EdgeVision - try the live model</h2>
+  <p>Upload a photo with people in it. Runs the real ONNX YOLOv8 model, live, right now.</p>
+
+  <input type="file" id="fileInput" accept="image/*">
+  <button id="detectBtn">Detect</button>
+
+  <div id="status"></div>
+  <img id="result">
+
+  <script>
+    const fileInput = document.getElementById("fileInput");
+    const detectBtn = document.getElementById("detectBtn");
+    const status = document.getElementById("status");
+    const result = document.getElementById("result");
+
+    detectBtn.onclick = async () => {
+      const file = fileInput.files[0];
+      if (!file) {
+        status.textContent = "Choose an image first.";
+        return;
+      }
+
+      status.textContent = "Running detection...";
+      result.style.display = "none";
+
+      const formData = new FormData();
+      formData.append("file", file);
+
+      try {
+        const response = await fetch("/demo/detect?format=image", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          status.textContent = `Error: ${errText}`;
+          return;
+        }
+
+        const blob = await response.blob();
+        result.src = URL.createObjectURL(blob);
+        result.style.display = "inline-block";
+        status.textContent = "Done.";
+      } catch (err) {
+        status.textContent = `Request failed: ${err}`;
+      }
+    };
+  </script>
+</body>
+</html>
