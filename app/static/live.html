@@ -35,6 +35,11 @@
     ws.onclose = () => { status.textContent = "disconnected"; };
     ws.onerror = () => { status.textContent = "error - is the server running with a real webcam?"; };
 
+    function colorForTrack(trackId) {
+      const hue = (trackId * 137.5) % 360;
+      return `hsl(${hue}, 85%, 55%)`;
+    }
+
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       status.textContent = `${data.detections.length} detected | ${data.inference_ms}ms`;
@@ -45,7 +50,7 @@
 
       const img = new Image();
       img.onload = () => {
-        // draw the actual camera frame first
+        // draw the camera frame first
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
         // draw the alert zone
@@ -53,14 +58,25 @@
         ctx.lineWidth = 2;
         ctx.strokeRect(ZONE.x1, ZONE.y1, ZONE.x2 - ZONE.x1, ZONE.y2 - ZONE.y1);
 
-        // draw each detection box
-        ctx.strokeStyle = "lime";
-        ctx.fillStyle = "lime";
+        // draw each tracked detection, colour-coded by track ID
         ctx.font = "16px monospace";
         for (const d of data.detections) {
           const [x1, y1, x2, y2] = d.box;
+          const color = colorForTrack(d.track_id);
+
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
           ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-          ctx.fillText(`${d.label} ${d.confidence.toFixed(2)}`, x1, Math.max(y1 - 6, 14));
+
+          const label = `#${d.track_id} ${d.label} ${d.confidence.toFixed(2)}`;
+          const textY = Math.max(y1 - 6, 14);
+
+          const textWidth = ctx.measureText(label).width;
+          ctx.fillStyle = color;
+          ctx.fillRect(x1, textY - 14, textWidth + 6, 18);
+
+          ctx.fillStyle = "#111";
+          ctx.fillText(label, x1 + 3, textY);
         }
       };
       img.src = "data:image/jpeg;base64," + data.frame;

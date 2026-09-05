@@ -53,6 +53,7 @@
 
         const blob = await response.blob();
         result.src = URL.createObjectURL(blob);
+        // TODO: URL.revokeObjectURL(oldUrl)
         result.style.display = "inline-block";
         status.textContent = "Done.";
       } catch (err) {
