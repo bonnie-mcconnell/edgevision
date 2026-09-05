@@ -17,6 +17,7 @@ import numpy as np
 from app.alerts import AlertManager, Zone
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
 from app.detector import HogPersonDetector, OnnxPersonDetector, draw_detections
+from app.tracker import Tracker
 
 
 @asynccontextmanager
@@ -110,8 +111,6 @@ async def demo_detect(
     return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
 
-
-
 @app.websocket("/ws/detections")
 async def websocket_detections(
     websocket: WebSocket, 
@@ -122,6 +121,7 @@ async def websocket_detections(
     ):
     """Streams detections+alerts. Needs VIDEO_SOURCE set to a webcam index or RTSP url."""
     await websocket.accept()
+    tracker = Tracker() # one per connection
 
     try:
         if not cap.isOpened():
@@ -142,18 +142,19 @@ async def websocket_detections(
                 continue
             t2 = time.perf_counter()
 
+            tracks = tracker.update(detections)
+
             fired_alerts = []
-            for det in detections:
-                if DEFAULT_ZONE.overlaps_box(det.x1, det.y1, det.x2, det.y2):
-                    alert = alert_manager.raise_if_new(DEFAULT_ZONE.name, det.label, det.confidence)
+            for track in tracks:
+                if DEFAULT_ZONE.overlaps_box(*track.box):
+                    alert = alert_manager.raise_if_new(DEFAULT_ZONE.name, track.label, track.confidence)
                     if alert:
                         fired_alerts.append(alert.to_dict())
 
             payload = {
                 "detections": [
-                    {"label": d.label, "confidence": d.confidence,
-                     "box": [d.x1, d.y1, d.x2, d.y2]}
-                    for d in detections
+                    {"track_id": t.track_id, "label": t.label, "confidence": t.confidence, "box": list(t.box)}
+                    for t in tracks
                 ],
                 "inference_ms": round(elapsed_s * 1000, 2),
                 "alerts": fired_alerts,
