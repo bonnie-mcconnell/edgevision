@@ -2,8 +2,10 @@ import os
 import time
 import cv2
 
-from app.detector import OnnxPersonDetector, draw_detections
-from app.tracker import Tracker, draw_tracks
+from app.detector import OnnxPersonDetector
+from app.tracker import Tracker
+from app.drawing import draw_detections, draw_tracks
+
 
 VIDEO_SOURCE = "test_footage/street.mp4"
 OUTPUT_DIR = "results/video"

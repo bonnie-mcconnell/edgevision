@@ -1,9 +1,6 @@
 import math
-import cv2
-import colorsys
 from collections.abc import Callable
 from dataclasses import dataclass
-import numpy as np
 
 from app.detector import Detection
 
@@ -152,29 +149,3 @@ def _greedy_match(score_matrix: list[list[float]], threshold: float, higher_bett
     unmatched_cols = [c for c in range(num_cols) if c not in used_cols]
 
     return matched, unmatched_rows, unmatched_cols
-
-
-def _color_for_track(track_id: int) -> tuple[int, int, int]:
-    """
-    Deterministic BGR color per track ID for cv2 drawing, using golden-angle
-    hue rotation (same as in live.html but for OpenCV). Consecutive integer
-    IDs land far apart on the color wheel, no setup/fixed palette.
-    """
-    hue = ((track_id * 137.5) % 360) / 360.0
-    r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.85)
-    return (int(b * 255), int(g * 255), int(r * 255))
-
-
-def draw_tracks(frame: np.ndarray, tracks: list[Track]) -> np.ndarray:
-    """
-    Draws each confirmed track's box + track_id/label/confidence, colour-coded
-    by track_id. Mutates frame in place (same object also returned).
-    """
-    for t in tracks:
-        x1, y1, x2, y2 = int(t.box[0]), int(t.box[1]), int(t.box[2]), int(t.box[3])
-        color = _color_for_track(t.track_id)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-        label = f"#{t.track_id} {t.label} {t.confidence:.2f}"
-        cv2.putText(frame, label, (x1, max(y1-10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-
-    return frame

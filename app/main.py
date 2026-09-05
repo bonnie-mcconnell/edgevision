@@ -16,7 +16,8 @@ import numpy as np
 
 from app.alerts import AlertManager, Zone
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
-from app.detector import HogPersonDetector, OnnxPersonDetector, draw_detections
+from app.detector import HogPersonDetector, OnnxPersonDetector
+from app.drawing import draw_detections
 from app.tracker import Tracker
 
 
