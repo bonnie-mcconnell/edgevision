@@ -46,7 +46,9 @@ def fake_get_redis_client():
 
 def fake_get_frame_source():
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    return FakeFrameSource([frame])
+    # Tracking requires min_hits consecutive matched frames before a
+    # track confirms and can alert (default min_hits=3)
+    return FakeFrameSource([frame, frame, frame])
 
 @pytest.fixture
 def client():
@@ -79,8 +81,15 @@ def test_recent_alerts_empty(client):
 
 def test_alert_full_pipeline(client):
     with client.websocket_connect("/ws/detections") as ws:
-        data = ws.receive_json()
-        assert len(data["alerts"]) == 1
+        # the same detection needs to repeat for min_hits frames before its
+        # track confirms and the alert can fire, so read every frame the fake
+        # source produces and check across all of them, not just the first
+        alert_fired = False
+        for _ in range(3):
+            data = ws.receive_json()
+            if data["alerts"]:
+                alert_fired = True
+        assert alert_fired
 
     response = client.get("/alerts/recent")
     assert len(response.json()["alerts"]) == 1
