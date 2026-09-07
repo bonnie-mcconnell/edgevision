@@ -1,5 +1,6 @@
 import fakeredis
 import pytest
+import cv2
 from fastapi.testclient import TestClient
 import numpy as np
 
@@ -34,6 +35,14 @@ class FakeFrameSource:
     def release(self):
         pass
 
+    def get(self, prop_id):
+        # need this to scale centroid_max_dist 
+        h, w = self._frames[0].shape[:2] if self._frames else (480, 640)
+        if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
+            return w
+        if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
+            return h
+        return 0
         
 
 def fake_get_detector():

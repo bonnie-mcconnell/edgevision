@@ -18,7 +18,7 @@ from app.alerts import AlertManager, Zone
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
 from app.detector import HogPersonDetector, OnnxPersonDetector
 from app.drawing import draw_detections
-from app.tracker import Tracker
+from app.tracker import Tracker, centroid_max_dist_for_resolution
 
 
 @asynccontextmanager
@@ -122,12 +122,15 @@ async def websocket_detections(
     ):
     """Streams detections+alerts. Needs VIDEO_SOURCE set to a webcam index or RTSP url."""
     await websocket.accept()
-    tracker = Tracker() # one per connection
 
     try:
         if not cap.isOpened():
             await websocket.send_json({"error": f"Could not open video source"})
             return
+
+        frame_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        frame_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        tracker = Tracker(centroid_max_dist=centroid_max_dist_for_resolution(frame_width, frame_height))
 
         while True:
             t0 = time.perf_counter()

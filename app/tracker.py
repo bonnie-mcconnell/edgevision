@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from app.detector import Detection
 
 
+def centroid_max_dist_for_resolution(width: float, height: float, pct: float = 0.07) -> float:
+    """Return a centroid distance threshold scaled to frame size instead of using
+    a constant. 7% derived from scripts/diagnose_fragmentation.py."""
+    return pct * math.hypot(width, height)
+
+
 @dataclass
 class Track:
     track_id: int
