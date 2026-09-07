@@ -2,7 +2,8 @@ import os
 import time
 import cv2
 
-from app.detector import OnnxPersonDetector, draw_detections
+from app.detector import OnnxPersonDetector
+from app.drawing import draw_detections
 
 
 VIDEO_SOURCE = "test_footage/street.mp4"

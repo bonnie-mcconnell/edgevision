@@ -1,14 +1,26 @@
+import argparse
 import os
 import time
 import cv2
 
 from app.detector import OnnxPersonDetector
-from app.tracker import Tracker
+from app.tracker import Tracker, centroid_max_dist_for_resolution
 from app.drawing import draw_detections, draw_tracks
 
 
-VIDEO_SOURCE = "test_footage/street.mp4"
+DEFAULT_VIDEO_SOURCE = "test_footage/street.mp4"
 OUTPUT_DIR = "results/video"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run detector+tracker over a video, writing paired before/after (raw vs tracked) outputs."
+    )
+    parser.add_argument(
+        "video", nargs="?", default=DEFAULT_VIDEO_SOURCE,
+        help=f"Path to input video (default: {DEFAULT_VIDEO_SOURCE})"
+    )
+    return parser.parse_args()
 
 
 def open_writer(out_path: str, fps: float, size: tuple[int, int]) -> cv2.VideoWriter:
@@ -22,9 +34,12 @@ def open_writer(out_path: str, fps: float, size: tuple[int, int]) -> cv2.VideoWr
 
 
 def main() -> None:
-    cap = cv2.VideoCapture(VIDEO_SOURCE)
+    args = parse_args()
+    video_source = args.video
+
+    cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
-        raise SystemExit(f"Couldn't open {VIDEO_SOURCE}")
+        raise SystemExit(f"Couldn't open {video_source}")
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -32,12 +47,13 @@ def main() -> None:
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     detector = OnnxPersonDetector("models/yolov8n.onnx")
-    tracker = Tracker()
+    tracker = Tracker(centroid_max_dist=centroid_max_dist_for_resolution(width, height))
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    raw_path = os.path.join(OUTPUT_DIR, "street_annotated.mp4")
-    tracked_path = os.path.join(OUTPUT_DIR, "street_tracked.mp4")
+    stem = os.path.splitext(os.path.basename(video_source))[0]
+    raw_path = os.path.join(OUTPUT_DIR, f"{stem}_annotated.mp4")
+    tracked_path = os.path.join(OUTPUT_DIR, f"{stem}_tracked.mp4")
     raw_writer = open_writer(raw_path, fps, (width, height))
     tracked_writer = open_writer(tracked_path, fps, (width, height))
 
