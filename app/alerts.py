@@ -34,11 +34,17 @@ def default_zone_for_resolution(width: float, height: float, name: str = "front_
     """
     return Zone(name=name, x1=int(width/3), y1=0, x2=int(2 * width/3), y2=int(height))
 
+
+# TODO: to be tuned
+LOITERING_SECONDS = 10.0
+
+
 @dataclass
 class Alert:
     zone_name: str
     label: str  # e.g "person"
     confidence: float
+    alert_type: str = "zone_entry"
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -46,6 +52,7 @@ class Alert:
             "zone_name": self.zone_name,
             "label": self.label,
             "confidence": round(self.confidence, 3),
+            "alert_type": self.alert_type,
             "timestamp": self.timestamp,
         }
 
@@ -55,19 +62,19 @@ class AlertManager:
         self.redis = redis_client
         self.cooldown_seconds = cooldown_seconds
 
-    def _dedup_key(self, zone_name: str, label: str) -> str:
-        return f"alert:cooldown:{zone_name}:{label}"
+    def _dedup_key(self, zone_name: str, label: str, alert_type: str) -> str:
+        return f"alert:cooldown:{alert_type}:{zone_name}:{label}"
 
-    def should_fire(self, zone_name: str, label: str) -> bool:
+    def should_fire(self, zone_name: str, label: str, alert_type: str = "zone_entry") -> bool:
         """True if this zone/label hasn't fired within the cooldown window."""
-        key = self._dedup_key(zone_name, label)
+        key = self._dedup_key(zone_name, label, alert_type)
         was_set = self.redis.set(key, "1", nx=True, ex=self.cooldown_seconds)
         return bool(was_set)
 
-    def raise_if_new(self, zone_name: str, label: str, confidence: float) -> Alert | None:
+    def raise_if_new(self, zone_name: str, label: str, confidence: float, alert_type: str = "zone_entry") -> Alert | None:
         """Logs and returns an Alert if not in cooldown, otherwise returns None."""
         if self.should_fire(zone_name, label):
-            alert = Alert(zone_name=zone_name, label=label, confidence=confidence)
+            alert = Alert(zone_name=zone_name, label=label, confidence=confidence, alert_type=alert_type)
             self.redis.lpush("alert:log", json.dumps(alert.to_dict()))
             self.redis.ltrim("alert:log", 0, 199)  # keep the log bounded to 200 alerts
             return alert

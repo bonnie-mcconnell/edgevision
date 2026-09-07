@@ -14,11 +14,11 @@ from fastapi.responses import FileResponse, Response
 from contextlib import asynccontextmanager
 import numpy as np
 
-from app.alerts import AlertManager, default_zone_for_resolution
+from app.alerts import AlertManager, default_zone_for_resolution, LOITERING_SECONDS
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
 from app.detector import HogPersonDetector, OnnxPersonDetector
 from app.drawing import draw_detections
-from app.tracker import Tracker, centroid_max_dist_for_resolution
+from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution
 
 
 @asynccontextmanager
@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="EdgeVision", lifespan=lifespan)
 
 
-# TODO: In a real deployment this comes from a per-camera config, drawn by the user in a setup UI.
+# TODO: In a real deployment zone comes from a per-camera config, drawn by the user in a setup UI.
 # actual zone is computed per connection in websocket_detections, scaled to that connection's resolution
 
 
@@ -131,7 +131,10 @@ async def websocket_detections(
         frame_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
         frame_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0 # fallback to avoid ZeroDivisionError
-        tracker = Tracker(centroid_max_dist=centroid_max_dist_for_resolution(frame_width, frame_height))
+        tracker = Tracker(
+            centroid_max_dist=centroid_max_dist_for_resolution(frame_width, frame_height),
+            stationary_threshold=stationary_move_threshold_for_resolution(frame_width, frame_height),
+            )
         zone = default_zone_for_resolution(frame_width, frame_height)
 
         while True:
@@ -154,14 +157,26 @@ async def websocket_detections(
             fired_alerts = []
             for track in tracks:
                 if zone.overlaps_box(*track.box):
-                    alert = alert_manager.raise_if_new(zone.name, track.label, track.confidence)
+                    alert = alert_manager.raise_if_new(zone.name, track.label, track.confidence, alert_type="zone_entry")
                     if alert:
                         fired_alerts.append(alert.to_dict())
 
+                    stationary_seconds = tracker.stationary_frames(track) / fps
+                    if tracker.has_moved(track) and stationary_seconds >= LOITERING_SECONDS:
+                        loiter_alert = alert_manager.raise_if_new(
+                            zone.name, track.label, track.confidence, alert_type="loitering"
+                        )
+                        if loiter_alert:
+                            fired_alerts.append(loiter_alert.to_dict())
+
             payload = {
                 "detections": [
-                    {"track_id": t.track_id, "label": t.label, "confidence": t.confidence, "box": list(t.box),
-                     "dwell_seconds": round(tracker.dwell_frames(t) / fps, 1)}
+                    {
+                        "track_id": t.track_id, "label": t.label, "confidence": t.confidence, "box": list(t.box),
+                        "dwell_seconds": round(tracker.dwell_frames(t) / fps, 1),
+                        "stationary_seconds": round(tracker.stationary_frames(t) / fps, 1),
+                        "has_moved": tracker.has_moved(t),
+                    }
                     for t in tracks
                 ],
                 "zone": {"name": zone.name, "x1": zone.x1, "y1": zone.y1, "x2": zone.x2, "y2": zone.y2},
