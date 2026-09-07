@@ -11,6 +11,14 @@ def centroid_max_dist_for_resolution(width: float, height: float, pct: float = 0
     return pct * math.hypot(width, height)
 
 
+def stationary_move_threshold_for_resolution(width: float, height: float, pct: float = 0.02) -> float:
+    """
+    Returns the distance a track's centorid must move from it's anchor position to
+    be seen as relocation (not standing still jitter). Scaled to frame size.
+    """
+    return pct * math.hypot(width, height)
+
+
 @dataclass
 class Track:
     track_id: int
@@ -21,19 +29,23 @@ class Track:
     misses: int
     confirmed: bool
     first_seen_frame: int
+    anchor_box: tuple[float, float, float, float] 
+    stationary_since_frame: int
 
 
 class Tracker:
     def __init__(self, iou_threshold: float = 0.3,
                  centroid_max_dist: float = 75.0,
                  min_hits: int = 3,
-                 max_age: int = 8):
+                 max_age: int = 8,
+                 stationary_threshold: float = 20.0):
         self.tracks: list[Track] = []
         self._next_id = 0
         self.iou_threshold = iou_threshold
         self.centroid_max_dist = centroid_max_dist
         self.min_hits = min_hits
         self.max_age = max_age
+        self.stationary_threshold = stationary_threshold
         self._frame_count = 0
 
     def update(self, detections: list[Detection]) -> list[Track]:
@@ -70,6 +82,10 @@ class Tracker:
             if track.hits >= self.min_hits:
                 track.confirmed = True
 
+            if _centroid_dist(track.box, track.anchor_box) >= self.stationary_threshold:
+                track.anchor_box = track.box
+                track.stationary_since_frame = self._frame_count
+
         for track_idx in final_unmatched_tracks:
             self.tracks[track_idx].misses += 1
 
@@ -77,7 +93,7 @@ class Tracker:
         for det_idx in final_unmatched_dets:
             det = detections[det_idx]
             box = (det.x1, det.y1, det.x2, det.y2)
-            new_tracks.append(Track(self._next_id, box, det.label, det.confidence, 1, 0, 1 >= self.min_hits, self._frame_count))
+            new_tracks.append(Track(self._next_id, box, det.label, det.confidence, 1, 0, 1 >= self.min_hits, self._frame_count, box, self._frame_count))
             self._next_id += 1
 
         self.tracks = [t for t in self.tracks if t.misses <= self.max_age] + new_tracks
@@ -87,6 +103,25 @@ class Tracker:
         """How many frames since this track was first seen. 
         Converting to seconds is done by caller: dwell_frames(track) / fps"""
         return self._frame_count - track.first_seen_frame
+
+    def stationary_frames(self, track: Track) -> int:
+        """
+        How many frames since this tracks position last relocated (moved further
+        than stationary_threshold from its anchor). Caller converts to seconds.
+        """
+        return self._frame_count - track.stationary_since_frame
+
+
+    def has_moved(self, track: Track) -> bool:
+        """
+        True if this track has relocated at least ocne since it was first seen.
+        Can't distinguish always-static object from real person who was standing still
+        from the first observed frame.
+        """
+        return track.stationary_since_frame != track.first_seen_frame
+
+
+    
 
 
 def _iou(boxA: tuple[float, float, float, float], boxB: tuple[float, float, float, float]) -> float:
