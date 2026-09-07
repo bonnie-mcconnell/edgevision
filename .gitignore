@@ -8,6 +8,8 @@ results/*
 !results/benchmark.csv
 !results/benchmark_real_model.csv
 !results/examples/
+!results/demo_entryway.gif
+!results/demo_crowd_limitation.gif
 
 coco_subset/
 
