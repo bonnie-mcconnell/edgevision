@@ -130,6 +130,7 @@ async def websocket_detections(
 
         frame_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
         frame_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0 # fallback to avoid ZeroDivisionError
         tracker = Tracker(centroid_max_dist=centroid_max_dist_for_resolution(frame_width, frame_height))
         zone = default_zone_for_resolution(frame_width, frame_height)
 
@@ -159,7 +160,8 @@ async def websocket_detections(
 
             payload = {
                 "detections": [
-                    {"track_id": t.track_id, "label": t.label, "confidence": t.confidence, "box": list(t.box)}
+                    {"track_id": t.track_id, "label": t.label, "confidence": t.confidence, "box": list(t.box),
+                     "dwell_seconds": round(tracker.dwell_frames(t) / fps, 1)}
                     for t in tracks
                 ],
                 "zone": {"name": zone.name, "x1": zone.x1, "y1": zone.y1, "x2": zone.x2, "y2": zone.y2},
@@ -168,7 +170,7 @@ async def websocket_detections(
                 "timing": {       # inference_ms kept for backward compat with existing consumers, timing gives the fuller breakdown
                     "read_ms": round((read_done - read_start) * 1000, 2),
                     "detect_ms": round(elapsed_s * 1000, 2),
-                    "track_ms": round((track_done - detect_done) * 100, 2),
+                    "track_ms": round((track_done - detect_done) * 1000, 2),
                 },
             }
 

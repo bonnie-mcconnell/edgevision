@@ -1,18 +1,31 @@
+import argparse
 import os
 import time
 import cv2
 
 from app.detector import OnnxPersonDetector
-from app.drawing import draw_detections
+from app.tracker import Tracker, centroid_max_dist_for_resolution
+from app.drawing import draw_detections, draw_tracks
 
 
-VIDEO_SOURCE = "test_footage/street.mp4"
+DEFAULT_VIDEO_SOURCE = "test_footage/street.mp4"
 OUTPUT_DIR = "results/video"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run detector+tracker over a video, writing paired before/after (raw vs tracked) outputs."
+    )
+    parser.add_argument(
+        "video", nargs="?", default=DEFAULT_VIDEO_SOURCE,
+        help=f"Path to input video (default: {DEFAULT_VIDEO_SOURCE})"
+    )
+    return parser.parse_args()
 
 
 def open_writer(out_path: str, fps: float, size: tuple[int, int]) -> cv2.VideoWriter:
     for codec in ("avc1", "mp4v"):
-        fourcc = cv2.VideoWriter_fourcc(*codec)  # type: ignore[attr-defined]
+        fourcc = cv2.VideoWriter_fourcc(*codec) # type:ignore[attr-defined]
         writer = cv2.VideoWriter(out_path, fourcc, fps, size)
         if writer.isOpened():
             print(f"Using codec: {codec}")
@@ -21,9 +34,12 @@ def open_writer(out_path: str, fps: float, size: tuple[int, int]) -> cv2.VideoWr
 
 
 def main() -> None:
-    cap = cv2.VideoCapture(VIDEO_SOURCE)
+    args = parse_args()
+    video_source = args.video
+
+    cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
-        raise SystemExit(f"Couldn't open {VIDEO_SOURCE}")
+        raise SystemExit(f"Couldn't open {video_source}")
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -31,10 +47,15 @@ def main() -> None:
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     detector = OnnxPersonDetector("models/yolov8n.onnx")
+    tracker = Tracker(centroid_max_dist=centroid_max_dist_for_resolution(width, height))
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, "street_annotated.mp4")
-    writer = open_writer(out_path, fps, (width, height))
+
+    stem = os.path.splitext(os.path.basename(video_source))[0]
+    raw_path = os.path.join(OUTPUT_DIR, f"{stem}_annotated.mp4")
+    tracked_path = os.path.join(OUTPUT_DIR, f"{stem}_tracked.mp4")
+    raw_writer = open_writer(raw_path, fps, (width, height))
+    tracked_writer = open_writer(tracked_path, fps, (width, height))
 
     frame_idx = 0
     start = time.perf_counter()
@@ -46,20 +67,31 @@ def main() -> None:
             frame_idx += 1
 
             detections, elapsed = detector.detect(frame)
-            frame = draw_detections(frame, detections)
-            
-            cv2.putText(frame, f"{len(detections)} detected  |  {elapsed * 1000:.0f}ms",
-                        (20, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            tracks = tracker.update(detections)
+            dwell_seconds = {t.track_id: tracker.dwell_frames(t) / fps for t in tracks}
 
-            writer.write(frame)
+            # two seperate copies, both draw_detections/draw_tracks mutate 
+            # in place so need before/after frames to stay independent
+            raw_frame = draw_detections(frame.copy(), detections)
+            cv2.putText(raw_frame, f"{len(detections)} detected (no tracking)  |  {elapsed * 1000:.0f}ms",
+                        (20, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            raw_writer.write(raw_frame)
+
+            tracked_frame = draw_tracks(frame.copy(), tracks, dwell_seconds=dwell_seconds)
+            cv2.putText(tracked_frame, f"{len(tracks)} tracked  |  {elapsed * 1000:.0f}ms",
+                        (20, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            tracked_writer.write(tracked_frame)
+
             if frame_idx % 60 == 0:
                 print(f"frame {frame_idx}/{total_frames}")
+
     finally:
         cap.release()
-        writer.release()
+        raw_writer.release()
+        tracked_writer.release()
 
     total_elapsed = time.perf_counter() - start
-    print(f"Done: {frame_idx} frames in {total_elapsed:.1f}s -> {out_path}")
+    print(f"Done: {frame_idx} frames in {total_elapsed:.1f}s -> {raw_path}, {tracked_path}")
 
 
 if __name__ == "__main__":

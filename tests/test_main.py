@@ -36,12 +36,14 @@ class FakeFrameSource:
         pass
 
     def get(self, prop_id):
-        # need this to scale centroid_max_dist 
+        # need this to scale centroid_max_dist and compute dwell_seconds
         h, w = self._frames[0].shape[:2] if self._frames else (480, 640)
         if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
             return w
         if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
             return h
+        if prop_id == cv2.CAP_PROP_FPS:
+            return 30.0
         return 0
         
 
