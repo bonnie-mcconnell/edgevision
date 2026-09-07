@@ -73,6 +73,18 @@ def test_different_label_not_suppressed(alert_manager):
     assert other is not None
 
 
+def test_different_alert_type_not_suppressed(alert_manager):
+    alert_manager.raise_if_new("front_door", "person", 0.9, "zone_entry")
+    loiter = alert_manager.raise_if_new("front_door", "person", 0.9, "loitering")
+    assert loiter is not None
+    assert loiter.alert_type == "loitering"
+
+
+def test_alert_type_defaults_to_zone_entry(alert_manager):
+    alert = alert_manager.raise_if_new("front_door", "person", 0.9)
+    assert alert.alert_type == "zone_entry"
+
+
 def test_recent_alerts_returns_most_recent_first(alert_manager):
     alert_manager.raise_if_new("zone_a", "person", 0.9)
     alert_manager.raise_if_new("zone_b", "person", 0.9)

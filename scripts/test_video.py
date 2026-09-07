@@ -3,8 +3,9 @@ import os
 import time
 import cv2
 
+from app.alerts import LOITERING_SECONDS
 from app.detector import OnnxPersonDetector
-from app.tracker import Tracker, centroid_max_dist_for_resolution
+from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution
 from app.drawing import draw_detections, draw_tracks
 
 
@@ -47,7 +48,10 @@ def main() -> None:
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     detector = OnnxPersonDetector("models/yolov8n.onnx")
-    tracker = Tracker(centroid_max_dist=centroid_max_dist_for_resolution(width, height))
+    tracker = Tracker(
+        centroid_max_dist=centroid_max_dist_for_resolution(width, height),
+        stationary_threshold=stationary_move_threshold_for_resolution(width, height),
+    )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -69,6 +73,10 @@ def main() -> None:
             detections, elapsed = detector.detect(frame)
             tracks = tracker.update(detections)
             dwell_seconds = {t.track_id: tracker.dwell_frames(t) / fps for t in tracks}
+            stationary_seconds = {
+                t.track_id: tracker.stationary_frames(t) / fps
+                for t in tracks if tracker.has_moved(t)
+            }
 
             # two seperate copies, both draw_detections/draw_tracks mutate 
             # in place so need before/after frames to stay independent
@@ -77,7 +85,13 @@ def main() -> None:
                         (20, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             raw_writer.write(raw_frame)
 
-            tracked_frame = draw_tracks(frame.copy(), tracks, dwell_seconds=dwell_seconds)
+            tracked_frame = draw_tracks(
+                frame.copy(), 
+                tracks, 
+                dwell_seconds=dwell_seconds,
+                stationary_seconds=stationary_seconds,
+                loitering_threshold=LOITERING_SECONDS,
+            )
             cv2.putText(tracked_frame, f"{len(tracks)} tracked  |  {elapsed * 1000:.0f}ms",
                         (20, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             tracked_writer.write(tracked_frame)

@@ -95,3 +95,71 @@ def test_track_carries_label_and_confidence_from_matched_detection():
     # confidence should refresh on each new match, not freeze at creation
     confirmed = tracker.update([make_det(10, 10, 50, 90, conf=0.77)])
     assert confirmed[0].confidence == 0.77
+
+
+def test_stationary_frames_increases_for_stationary_person():
+    tracker = Tracker(min_hits=1, stationary_threshold=20.0)
+
+    boxes = [
+        (100, 100, 150, 200), (101, 100, 151, 200), (100, 101, 150, 201),
+        (102, 100, 152, 200), (100, 100, 150, 200),
+    ]
+    confirmed = None
+    for box in boxes:
+        confirmed = tracker.update([make_det(*box)])
+
+    assert confirmed is not None
+    assert tracker.stationary_frames(confirmed[0]) == 4 
+
+
+def test_stationary_frames_resets_on_relocation():
+    tracker = Tracker(min_hits=1, stationary_threshold=20.0)
+    box_here = (100, 100, 150, 200)
+    # centroid moved 40px (stationary_threshold < 40 < centroid_max_dist)
+    box_relocated = (140, 100, 190, 200)
+
+    tracker.update([make_det(*box_here)])
+    tracker.update([make_det(*box_here)])
+    tracker.update([make_det(*box_here)])
+    confirmed = tracker.update([make_det(*box_relocated)])
+
+    assert len(confirmed) == 1 # not a new track
+    assert tracker.stationary_frames(confirmed[0]) == 0
+
+
+def test_stationary_frames_continues_accumulating_under_threshold():
+    """Test jitter e.g a move thats real but under stationary_threshold."""
+    tracker = Tracker(min_hits=1, stationary_threshold=20.0)
+    box_a = (100, 100, 150, 200)
+    box_b = (105, 100, 155, 200) # centroid moved 5px
+
+    tracker.update([make_det(*box_a)])
+    tracker.update([make_det(*box_a)])
+    confirmed = tracker.update([make_det(*box_b)])
+
+    assert tracker.stationary_frames(confirmed[0]) == 2
+
+
+def test_has_moved_false_for_unmoving_track():
+    tracker = Tracker(min_hits=1, stationary_threshold=20.0)
+    box = (100, 100, 150, 200)
+
+    confirmed = None
+    for _ in range(10):
+        confirmed = tracker.update([make_det(*box)])
+
+    assert confirmed is not None
+    assert tracker.has_moved(confirmed[0]) is False
+    assert tracker.stationary_frames(confirmed[0]) == 9
+
+
+def test_has_moved_true_after_reloaction():
+    tracker = Tracker(min_hits=1, stationary_threshold=20.0)
+    box_start = (100, 100, 150, 200)
+    box_after = (140, 100, 190, 200) # centroid moved 40px
+
+    tracker.update([make_det(*box_start)])
+    confirmed = tracker.update([make_det(*box_after)])
+
+    assert len(confirmed) == 1
+    assert tracker.has_moved(confirmed[0]) is True
