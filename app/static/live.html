@@ -20,9 +20,6 @@
   <div id="status">connecting...</div>
 
   <script>
-    // Keep in sync with DEFAULT_ZONE in app/main.py
-    const ZONE = { x1: 200, y1: 0, x2: 440, y2: 480 };
-
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
     const banner = document.getElementById("alert-banner");
@@ -53,10 +50,13 @@
         // draw the camera frame first
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-        // draw the alert zone
-        ctx.strokeStyle = "yellow";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(ZONE.x1, ZONE.y1, ZONE.x2 - ZONE.x1, ZONE.y2 - ZONE.y1);
+        if (data.zone) { // read from servers payload
+          const z = data.zone
+          // draw the alert zone
+          ctx.strokeStyle = "yellow";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(z.x1, z.y1, z.x2 - z.x1, z.y2 - z.y1);
+        }
 
         // draw each tracked detection, colour-coded by track ID
         ctx.font = "16px monospace";
