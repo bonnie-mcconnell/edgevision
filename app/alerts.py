@@ -26,6 +26,14 @@ class Zone:
         )
 
 
+def default_zone_for_resolution(width: float, height: float, name: str = "front_door") -> Zone:
+    """
+    Returns Zone bounded to the middle third of the frame, scaled to the
+    actual images resolution. TODO: real deployments would want a per camera
+    configured zone drawn by a user in a setup UI.
+    """
+    return Zone(name=name, x1=int(width/3), y1=0, x2=int(2 * width/3), y2=int(height))
+
 @dataclass
 class Alert:
     zone_name: str

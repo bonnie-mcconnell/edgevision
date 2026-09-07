@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, Response
 from contextlib import asynccontextmanager
 import numpy as np
 
-from app.alerts import AlertManager, Zone
+from app.alerts import AlertManager, default_zone_for_resolution
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
 from app.detector import HogPersonDetector, OnnxPersonDetector
 from app.drawing import draw_detections
@@ -31,9 +31,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="EdgeVision", lifespan=lifespan)
 
-# Example zone: middle third of a 640x480 frame.
+
 # TODO: In a real deployment this comes from a per-camera config, drawn by the user in a setup UI.
-DEFAULT_ZONE = Zone(name="front_door", x1=200, y1=0, x2=440, y2=480)
+# actual zone is computed per connection in websocket_detections, scaled to that connection's resolution
 
 
 @app.get("/health")
@@ -131,27 +131,29 @@ async def websocket_detections(
         frame_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
         frame_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
         tracker = Tracker(centroid_max_dist=centroid_max_dist_for_resolution(frame_width, frame_height))
+        zone = default_zone_for_resolution(frame_width, frame_height)
 
         while True:
-            t0 = time.perf_counter()
+            read_start = time.perf_counter()
             ok, frame = cap.read()
             if not ok:
                 break
-            t1 = time.perf_counter()
+            read_done = time.perf_counter()
 
             try:
                 detections, elapsed_s = detector.detect(frame)
             except Exception as e:
                 print(f"detector error on frame, skipping: {e}")
                 continue
-            t2 = time.perf_counter()
+            detect_done = time.perf_counter()
 
             tracks = tracker.update(detections)
+            track_done = time.perf_counter()
 
             fired_alerts = []
             for track in tracks:
-                if DEFAULT_ZONE.overlaps_box(*track.box):
-                    alert = alert_manager.raise_if_new(DEFAULT_ZONE.name, track.label, track.confidence)
+                if zone.overlaps_box(*track.box):
+                    alert = alert_manager.raise_if_new(zone.name, track.label, track.confidence)
                     if alert:
                         fired_alerts.append(alert.to_dict())
 
@@ -160,20 +162,22 @@ async def websocket_detections(
                     {"track_id": t.track_id, "label": t.label, "confidence": t.confidence, "box": list(t.box)}
                     for t in tracks
                 ],
+                "zone": {"name": zone.name, "x1": zone.x1, "y1": zone.y1, "x2": zone.x2, "y2": zone.y2},
                 "inference_ms": round(elapsed_s * 1000, 2),
                 "alerts": fired_alerts,
                 "timing": {       # inference_ms kept for backward compat with existing consumers, timing gives the fuller breakdown
-                    "read_ms": round((t1 - t0) * 1000, 2),
+                    "read_ms": round((read_done - read_start) * 1000, 2),
                     "detect_ms": round(elapsed_s * 1000, 2),
+                    "track_ms": round((track_done - detect_done) * 100, 2),
                 },
             }
 
             if include_frame:
-                t3 = time.perf_counter()
+                encode_start = time.perf_counter()
                 ok_enc, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
                 if ok_enc:
                     payload["frame"] = base64.b64encode(buffer.tobytes()).decode("utf-8")
-                payload["timing"]["encode_ms"] = round((time.perf_counter() - t3) * 1000, 2)
+                payload["timing"]["encode_ms"] = round((time.perf_counter() - encode_start) * 1000, 2)
 
             await websocket.send_json(payload)
             await asyncio.sleep(0.01)  # yield control, don't peg the event loop
