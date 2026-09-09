@@ -43,7 +43,7 @@ LOITERING_SECONDS = 10.0
 
 class EntryExitCounter:
     """
-    Turns per-frame in-zeon checks into entry/exit events by diffing against
+    Turns per-frame in-zone checks into entry/exit events by diffing against
     each track's inside/outside state from the previous frame.
 
     Limitations: 

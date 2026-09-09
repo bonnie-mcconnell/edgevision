@@ -45,7 +45,20 @@ class FakeFrameSource:
         if prop_id == cv2.CAP_PROP_FPS:
             return 30.0
         return 0
-        
+
+
+class FakeMovingThenStillDetector:
+    """Moves once early, then holds still."""
+    def __init__(self):
+        self.frame_num = 0
+
+    def detect(self, frame):
+        self.frame_num += 1
+        # relocate once on frame 1->2 then never again (e.g move once)
+        box = (220, 100, 280, 300) if self.frame_num == 1 else (250, 100, 310, 300)
+        det = Detection(label="person", confidence=0.9, x1=box[0], y1=box[1], x2=box[2], y2=box[3])
+        return [det], 0.01
+
 
 def fake_get_detector():
     return FakeDetector()
@@ -105,19 +118,6 @@ def test_alert_full_pipeline(client):
 
     response = client.get("/alerts/recent")
     assert len(response.json()["alerts"]) == 1
-
-
-class FakeMovingThenStillDetector:
-    """Moves once early, then holds still."""
-    def __init__(self):
-        self.frame_num = 0
-
-    def detect(self, frame):
-        self.frame_num += 1
-        # relocate once on frame 1->2 then never again (e.g move once)
-        box = (220, 100, 280, 300) if self.frame_num == 1 else (250, 100, 310, 300)
-        det = Detection(label="person", confidence=0.9, x1=box[0], y1=box[1], x2=box[2], y2=box[3])
-        return [det], 0.01
 
 
 def test_loitering_alert_fires_after_stationary_time():
@@ -238,7 +238,7 @@ def test_loitering_alert_doesnt_fire_for_false_positive():
     num_frames = 310
  
     main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
-    main_module.app.dependency_overrides[deps.get_detector] = fake_get_detector  # FakeDetector -- static box, never moves
+    main_module.app.dependency_overrides[deps.get_detector] = fake_get_detector 
     main_module.app.dependency_overrides[deps.get_frame_source] = lambda: FakeFrameSource([frame] * num_frames)
 
     try:

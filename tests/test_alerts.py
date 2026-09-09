@@ -141,8 +141,7 @@ def test_entry_fires_when_track_moves_into_zone(zone):
 
 def test_exit_fires_when_track_leaves_zone(zone):
     counter = EntryExitCounter()
-    counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1})
-    counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1})  # seed as inside
+    counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1}) # seed as inside
 
     events = counter.update([make_track(1, OUTSIDE_BOX)], zone, alive_ids={1})
 
@@ -172,7 +171,7 @@ def test_stale_track_state_pruned_when_no_longer_alive(zone):
 
     # new track reusing distinct id shouldn't inherit old state
     events = counter.update([make_track(2, INSIDE_BOX)], zone, alive_ids={2})
-    assert events == []  # treated as first observation, correctly
+    assert events == []  # treated as first observation correctly
 
 
 def test_entries_and_exits_accumulate_across_multiple_tracks(zone):
