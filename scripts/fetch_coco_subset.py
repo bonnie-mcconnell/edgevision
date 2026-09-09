@@ -21,7 +21,7 @@ import os
 # Which COCO classes to pull. 
 CLASSES = ["person"]
 
-NUM_IMAGES = 40       
+NUM_IMAGES = 200
 SPLIT = "validation"     # val2017
 OUTPUT_DIR = "./coco_subset" 
 
