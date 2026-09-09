@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 import redis
 
+from app.tracker import Track
+
 
 @dataclass(frozen=True)
 class Zone:
@@ -37,6 +39,56 @@ def default_zone_for_resolution(width: float, height: float, name: str = "front_
 
 # TODO: to be tuned
 LOITERING_SECONDS = 10.0
+
+
+class EntryExitCounter:
+    """
+    Turns per-frame in-zeon checks into entry/exit events by diffing against
+    each track's inside/outside state from the previous frame.
+
+    Limitations: 
+    - A track's first observation only seeds its state, it never fires an
+      event. A track that's already inside the zone the first frame it's 
+      confirmed is indistinguishable from one that just walked in, so it's not
+      counted as an entry.
+    - Only confirmed tracks are counted so a fast entry can be fully inside the zone
+      before it's first observed here and never register as an entry event, only
+      as an exit.
+    - If a track dies while still inside the zone (past max_age, leaves frame) no exit 
+      event fires. entries - exits as live occupancy count overcounts in this case.
+    """
+    def __init__(self):
+        self._inside: dict[int, bool] = {}
+        self.entries = 0
+        self.exits = 0
+
+    def update(self, tracks: list[Track], zone: Zone, alive_ids: set[int]) -> list[dict]:
+        """
+        Call once per frame with the tracker's confirmed tracks.
+        Returns list of {"track_id": int, "event": "entry"|"exit"} for 
+        transitions found this frame.
+        """
+        self._inside = {tid: was_inside for tid, was_inside in self._inside.items() if tid in alive_ids}
+
+        events = []
+        for track in tracks:
+            is_inside = zone.overlaps_box(*track.box)
+            was_inside = self._inside.get(track.track_id)
+
+            if was_inside is None:
+                self._inside[track.track_id] = is_inside
+                continue
+
+            if is_inside and not was_inside:
+                self.entries += 1
+                events.append({"track_id": track.track_id, "event": "entry"})
+            elif was_inside and not is_inside:
+                self.exits += 1
+                events.append({"track_id": track.track_id, "event": "exit"})
+
+            self._inside[track.track_id] = is_inside 
+
+        return events
 
 
 @dataclass

@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, Response
 from contextlib import asynccontextmanager
 import numpy as np
 
-from app.alerts import AlertManager, default_zone_for_resolution, LOITERING_SECONDS
+from app.alerts import AlertManager, EntryExitCounter, default_zone_for_resolution, LOITERING_SECONDS
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
 from app.detector import HogPersonDetector, OnnxPersonDetector
 from app.drawing import draw_detections
@@ -136,6 +136,7 @@ async def websocket_detections(
             stationary_threshold=stationary_move_threshold_for_resolution(frame_width, frame_height),
             )
         zone = default_zone_for_resolution(frame_width, frame_height)
+        entry_exit_counter = EntryExitCounter()
 
         while True:
             read_start = time.perf_counter()
@@ -153,6 +154,8 @@ async def websocket_detections(
 
             tracks = tracker.update(detections)
             track_done = time.perf_counter()
+
+            crossing_events = entry_exit_counter.update(tracks, zone, tracker.alive_track_ids())
 
             fired_alerts = []
             for track in tracks:
@@ -180,6 +183,8 @@ async def websocket_detections(
                     for t in tracks
                 ],
                 "zone": {"name": zone.name, "x1": zone.x1, "y1": zone.y1, "x2": zone.x2, "y2": zone.y2},
+                "crossing_events": crossing_events,
+                "occupancy": {"entries": entry_exit_counter.entries, "exits": entry_exit_counter.exits},
                 "inference_ms": round(elapsed_s * 1000, 2),
                 "alerts": fired_alerts,
                 "timing": {       # inference_ms kept for backward compat with existing consumers, timing gives the fuller breakdown
