@@ -73,7 +73,7 @@ class AlertManager:
 
     def raise_if_new(self, zone_name: str, label: str, confidence: float, alert_type: str = "zone_entry") -> Alert | None:
         """Logs and returns an Alert if not in cooldown, otherwise returns None."""
-        if self.should_fire(zone_name, label):
+        if self.should_fire(zone_name, label, alert_type):
             alert = Alert(zone_name=zone_name, label=label, confidence=confidence, alert_type=alert_type)
             self.redis.lpush("alert:log", json.dumps(alert.to_dict()))
             self.redis.ltrim("alert:log", 0, 199)  # keep the log bounded to 200 alerts
