@@ -1,7 +1,20 @@
 import fakeredis
 import pytest
 
-from app.alerts import AlertManager, Zone
+from app.alerts import AlertManager, EntryExitCounter, Zone
+from app.tracker import Track
+
+
+OUTSIDE_BOX = (0, 150, 50, 250)   #left of zone (x1=100..x2=300)
+INSIDE_BOX = (150, 150, 250, 250)
+
+
+def make_track(track_id, box, first_seen_frame=1):
+    return Track(
+        track_id=track_id, box=box, label="person", confidence=0.9,
+        hits=3, misses=0, confirmed=True, first_seen_frame=first_seen_frame,
+        anchor_box=box, stationary_since_frame=first_seen_frame,
+    )
 
 
 @pytest.fixture
@@ -102,3 +115,73 @@ def test_recent_alerts_respects_limit(alert_manager):
 def test_recent_alerts_zero_limit_returns_empty(alert_manager):
     alert_manager.raise_if_new("zone_a", "person", 0.9)
     assert alert_manager.recent_alerts(limit=0) == []
+
+
+def test_first_observation_does_not_fire_event(zone):
+    counter = EntryExitCounter()
+    track = make_track(1, INSIDE_BOX)
+
+    events = counter.update([track], zone, alive_ids={1})
+
+    assert events == []
+    assert counter.entries == 0
+    assert counter.exits == 0
+
+
+def test_entry_fires_when_track_moves_into_zone(zone):
+    counter = EntryExitCounter()
+    counter.update([make_track(1, OUTSIDE_BOX)], zone, alive_ids={1})
+
+    events = counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1})
+
+    assert events == [{"track_id": 1, "event": "entry"}]
+    assert counter.entries == 1
+    assert counter.exits == 0
+
+
+def test_exit_fires_when_track_leaves_zone(zone):
+    counter = EntryExitCounter()
+    counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1})
+    counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1})  # seed as inside
+
+    events = counter.update([make_track(1, OUTSIDE_BOX)], zone, alive_ids={1})
+
+    assert events == [{"track_id": 1, "event": "exit"}]
+    assert counter.exits == 1
+    assert counter.entries == 0
+
+
+def test_no_event_while_track_stays_inside(zone):
+    counter = EntryExitCounter()
+    counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1})
+
+    events = counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1})
+
+    assert events == []
+    assert counter.entries == 0
+    assert counter.exits == 0
+
+
+def test_stale_track_state_pruned_when_no_longer_alive(zone):
+    counter = EntryExitCounter()
+    counter.update([make_track(1, INSIDE_BOX)], zone, alive_ids={1})
+
+    # track 1 has died (max_age exceeded), alive_ids no longer includes it
+    counter.update([], zone, alive_ids=set())
+    assert counter._inside == {}
+
+    # new track reusing distinct id shouldn't inherit old state
+    events = counter.update([make_track(2, INSIDE_BOX)], zone, alive_ids={2})
+    assert events == []  # treated as first observation, correctly
+
+
+def test_entries_and_exits_accumulate_across_multiple_tracks(zone):
+    counter = EntryExitCounter()
+    counter.update([make_track(1, OUTSIDE_BOX), make_track(2, INSIDE_BOX)], zone, alive_ids={1, 2})
+
+    events = counter.update([make_track(1, INSIDE_BOX), make_track(2, OUTSIDE_BOX)], zone, alive_ids={1, 2})
+
+    assert {"track_id": 1, "event": "entry"} in events
+    assert {"track_id": 2, "event": "exit"} in events
+    assert counter.entries == 1
+    assert counter.exits == 1

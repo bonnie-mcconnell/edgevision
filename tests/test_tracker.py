@@ -163,3 +163,37 @@ def test_has_moved_true_after_reloaction():
 
     assert len(confirmed) == 1
     assert tracker.has_moved(confirmed[0]) is True
+
+
+def test_alive_track_ids_includes_unconfirmed_track():
+    tracker = Tracker(min_hits=3)
+    tracker.update([make_det(10, 10, 50, 90)])
+
+    assert len(tracker.alive_track_ids()) == 1
+
+
+def test_alive_track_ids_includes_confirmed_track_during_miss_gap():
+    tracker = Tracker(min_hits=1, max_age=3)
+    box = (100, 100, 150, 200)
+
+    confirmed = tracker.update([make_det(*box)])
+    track_id = confirmed[0].track_id
+
+    tracker.update([])  # one missed frame, still within max_age
+
+    assert track_id in tracker.alive_track_ids()
+
+
+def test_alive_track_ids_excludes_track_after_it_dies():
+    tracker = Tracker(min_hits=1, max_age=2)
+    box = (100, 100, 150, 200)
+
+    confirmed = tracker.update([make_det(*box)])
+    track_id = confirmed[0].track_id
+
+    tracker.update([])
+    tracker.update([])
+    tracker.update([])  # exceeds max_age, track should be gone
+
+    assert track_id not in tracker.alive_track_ids()
+    assert tracker.alive_track_ids() == set()

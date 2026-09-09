@@ -145,6 +145,90 @@ def test_loitering_alert_fires_after_stationary_time():
         main_module.app.dependency_overrides.clear()
 
 
+class FakeApproachingThenInsideDetector:
+    """Static outside the zone for 3 frames (lets the track confirm before
+    it ever touches the zone), then steps inward 40px/frame (< centroid_max_dist
+    of 56px for a 640x480 frame, so the track ID is preserved) until it's
+    inside. Zone for 640x480 is x1=213 - x2=426."""
+    def __init__(self):
+        self.frame_num = 0
+
+    def detect(self, frame):
+        self.frame_num += 1
+        if self.frame_num <= 3:
+            x1 = 470  # outside: x1 > zone x2=426
+        else:
+            x1 = 470 - 40 * (self.frame_num - 3)  # steps to 430, 390, 350 etc
+        det = Detection(label="person", confidence=0.9, x1=x1, y1=100, x2=x1 + 60, y2=300)
+        return [det], 0.01
+
+
+def test_entry_event_and_occupancy_when_track_walks_into_zone():
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    shared_alert_manager = AlertManager(fake_redis, cooldown_seconds=30)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    num_frames = 7
+
+    main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
+    main_module.app.dependency_overrides[deps.get_detector] = lambda: FakeApproachingThenInsideDetector()
+    main_module.app.dependency_overrides[deps.get_frame_source] = lambda: FakeFrameSource([frame] * num_frames)
+
+    try:
+        with TestClient(main_module.app) as test_client:
+            with test_client.websocket_connect("/ws/detections") as ws:
+                entry_events = []
+                last_occupancy = None
+                for _ in range(num_frames):
+                    data = ws.receive_json()
+                    entry_events += [e for e in data["crossing_events"] if e["event"] == "entry"]
+                    last_occupancy = data["occupancy"]
+                assert len(entry_events) == 1
+                assert last_occupancy == {"entries": 1, "exits": 0}
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+
+class FakeInsideThenLeavingDetector:
+    """Static inside the zone for 3 frames, then steps outward 40px/frame
+    until it's fully outside."""
+    def __init__(self):
+        self.frame_num = 0
+
+    def detect(self, frame):
+        self.frame_num += 1
+        if self.frame_num <= 3:
+            x1 = 250  # inside: overlaps zone x1=213..x2=426
+        else:
+            x1 = 250 + 40 * (self.frame_num - 3)  # steps to 290, 330, 370, 410, 450 (outside)
+        det = Detection(label="person", confidence=0.9, x1=x1, y1=100, x2=x1 + 60, y2=300)
+        return [det], 0.01
+
+
+def test_exit_event_and_occupancy_when_track_walks_out_of_zone():
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    shared_alert_manager = AlertManager(fake_redis, cooldown_seconds=30)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    num_frames = 8
+
+    main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
+    main_module.app.dependency_overrides[deps.get_detector] = lambda: FakeInsideThenLeavingDetector()
+    main_module.app.dependency_overrides[deps.get_frame_source] = lambda: FakeFrameSource([frame] * num_frames)
+
+    try:
+        with TestClient(main_module.app) as test_client:
+            with test_client.websocket_connect("/ws/detections") as ws:
+                exit_events = []
+                last_occupancy = None
+                for _ in range(num_frames):
+                    data = ws.receive_json()
+                    exit_events += [e for e in data["crossing_events"] if e["event"] == "exit"]
+                    last_occupancy = data["occupancy"]
+                assert len(exit_events) == 1
+                assert last_occupancy == {"entries": 0, "exits": 1}
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+
 def test_loitering_alert_doesnt_fire_for_false_positive():
     """A detection that's always at same position (the sign example)
     should never fire a loitering alert."""
