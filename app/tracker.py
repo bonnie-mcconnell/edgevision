@@ -99,6 +99,17 @@ class Tracker:
         self.tracks = [t for t in self.tracks if t.misses <= self.max_age] + new_tracks
         return [track for track in self.tracks if track.confirmed]
 
+    def alive_track_ids(self) -> set[int]:
+        """
+        IDs of every track this Tracker is still holding internally, confirmed
+        or not, as long as misses <= max_age. Wider than update()'s return value
+        (which is confirmed-only). Callers keeping their own per-track_id state
+        (e.g. entry/exit crossing state) can diff against this set each frame to
+        remove IDs for tracks that have expired to avoid memory leakage for long 
+        running streams.
+        """
+        return {track.track_id for track in self.tracks}
+
     def dwell_frames(self, track: Track) -> int:
         """How many frames since this track was first seen. 
         Converting to seconds is done by caller: dwell_frames(track) / fps"""
