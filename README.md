@@ -1,6 +1,6 @@
 # EdgeVision
 
-Person detection + zone alerting for a security camera use case, with a benchmark comparing FP32 vs INT8 quantized inference on CPU.
+Person detection + zone alerting for a security camera use case, with a benchmark comparing FP32, INT8 (dynamic and static), and FP16 quantized inference on CPU.
 
 ## Quick start
 
@@ -16,18 +16,22 @@ A video frame arrives, a detector finds people, a lightweight tracker links dete
 
 ## Accuracy
 
-Evaluated `OnnxPersonDetector` (real yolov8n.onnx) against a 40-image labeled subset of COCO val2017 (person class only, seeded sample, see `scripts/fetch_coco_subset.py`), matching predictions to ground truth via IoU ≥ 0.5:
+Evaluated `OnnxPersonDetector` (real yolov8n.onnx) against a 200-image labeled subset of COCO val2017 (person class only, seeded sample, see `scripts/fetch_coco_subset.py`), matching predictions to ground truth via IoU ≥ 0.5, with a bootstrapped 95% CI at each threshold (`scripts/check_accuracy.py`):
 
-| conf threshold | precision | recall | tp | fp | fn |
+| conf threshold | precision [95% CI] | recall [95% CI] | tp | fp | fn |
 |---|---|---|---|---|---|
-| 0.25 | 0.797 | 0.615 | 110 | 28 | 69 |
-| 0.40 (default) | 0.877 | 0.559 | 100 | 14 | 79 |
-| 0.50 | 0.917 | 0.492 | 88 | 8 | 91 |
-| 0.60 | 0.974 | 0.413 | 74 | 2 | 105 |
+| 0.25 | 0.814 [0.768, 0.861] | 0.628 [0.584, 0.673] | 553 | 126 | 328 |
+| 0.40 (default) | 0.888 [0.846, 0.928] | 0.531 [0.486, 0.579] | 468 | 59 | 413 |
+| 0.50 | 0.919 [0.884, 0.952] | 0.476 [0.431, 0.524] | 419 | 37 | 462 |
+| 0.60 | 0.953 [0.926, 0.976] | 0.410 [0.366, 0.458] | 361 | 18 | 520 |
 
 There is a monotonic precision/recall tradeoff as the threshold rises with fewer false alarms, but more missed people. For a security-camera use case a missed person is usually worse than a false alarm, which argues for running below the library default of 0.4, closer to 0.25, trading some false-positive noise for meaningfully better recall.
 
-However, 40 images is a small sample, so although the curve shape is consistent and direction looks correct treat the exact precision/recall values as approximate. `coco_subset/` is gitignored, can regenerate it with `python scripts/fetch_coco_subset.py`.
+The widened 200-image run confirmed the original 40-image numbers (all four thresholds landed within ~1-2 points of precision/recall on the original small sample). Every interval above is under 9 points wide, and none cross into ambiguous territory (e.g. 0.40's precision CI is [0.846, 0.928]).
+
+**Confidence interval methodology:** `bootstrap_ci()` resamples at the image level (not per-detection, since detections inside one image are correlated, so a badly-lit or crowded image drags every detection in it down together, images are the actual i.i.d. sampling unit). This benchmark does 2000 resamples, the image-indices drawn with replacement, precision/recall recomputed per resample, 2.5th/97.5th percentiles taken as the interval. The point estimate reported is the aggregate from the actual data, not the mean of the resamples. The resamples characterize spread around that number, they don't replace it. Verified this bootstrap against an independent, non-vectorized reference implementation with a different RNG agreeing to within 0.02 on the same data, plus deterministic sanity checks (a single image or every identical images must both collapse the CI to exactly zero width in `tests/test_check_accuracy.py`).
+
+`coco_subset/` is gitignored, regenerate with `python scripts/fetch_coco_subset.py`.
 
 Two annotated real-image spot checks are included: (`results/examples/`): `bus.jpg` (4 people in frame, all 4 found) and `zidane.jpg` (2 people, both found).
 
@@ -66,6 +70,34 @@ With the original `max_age=8`, 75.8% of all track deaths on video of a crowded s
 
 `centroid_max_dist` is scaled to 7% of the frame diagonal, and hardcoded alert zone was replaced with a similar resolution-scaled fix in `alerts.py`/`main.py`.
 
+### Dwell, stationary detection, and loitering
+
+On top of persistent track IDs: `dwell_frames()` (how long a track's been visible), `stationary_frames()` (how long since it last actually relocated), and `has_moved()` (whether it's ever relocated at all, which exists to detect false positives).
+
+Both `dwell_frames()` and `stationary_frames()` count frames, not wall-clock seconds, because `Tracker` has no reliable notion of real time between a live websocket stream and an offline video. The caller converts to seconds using `frames / fps` (fps read once from the capture source).
+
+`stationary_frames()` functions using an anchor box. Each track keeps an `anchor_box` set the first time it's seen, and only moves the anchor (resetting the stationary clock) once its centroid has moved further than `stationary_move_threshold_for_resolution()`, default 2% of the frame diagonal, smaller than tracking's default 7% `centroid_max_dist`, since it's answering a different question: "has this thing relocated" vs "is this still probably the same object frame-to-frame."
+
+**`has_moved()` false positive fixes** A static misdetected object never triggers an anchor reset, so by `stationary_frames()` alone it looks identical to a person who's actually lotering, and would eventually cross `LOITERING_SECONDS` and fire an alert. `has_moved()` gates loitering eligibility on the track having relocated at least once since it was first seen (`stationary_since_frame != first_seen_frame`). A sign (like the false positive found in the demo) never moves, so it never passes this gate. A real person almost always shifts position within a few seconds of being confirmed, so they are likely to pass the gate and not trigger a false negative.
+
+This can't distinguish an always-static object from a real person who happened to be standing still already in the very first frame they were ever observed. That edge case would need a longer observation window or a size/aspect-ratio prior.
+
+`app/main.py`'s websocket loop checks `has_moved(track) and stationary_seconds >= LOITERING_SECONDS` for every confirmed track inside the zone, firing a `loitering`-type alert through `AlertManager`. `Alert`/`AlertManager` gained an `alert_type` field (default `"zone_entry"`, backward compatible) so a `zone_entry` and a `loitering` alert for the same zone+label don't collide on the same Redis cooldown key.
+
+`LOITERING_SECONDS = 10.0` is a hardcoded estimated placeholder.`iou_threshold` and `max_age` were retuned against footage.
+
+### Direction-aware entry/exit counting
+
+`EntryExitCounter` (`app/alerts.py`) makes the zone-overlap check every frame already did into entry/exit events by diffing each confirmed track's inside/outside state against what it was last frame. It needs `Tracker.alive_track_ids()` (every track ID the tracker still holds internally, confirmed or not, as long as `misses <= max_age`) to know when to forget a track's state, otherwise it would leak memory on a long-running stream.
+
+Limitations:
+
+- A track's first-ever observation seeds its state, but it doesn't fire an event. A track that's already inside the zone on the first frame it's confirmed is indistinguishable from one that just walked in.
+- Because confirmation takes `min_hits` (3) frames, a track walking straight into the zone can already be confirmed while inside it, meaning the entry event gets missed, only the eventual exit shows up. 
+- If a track dies (occlusion past `max_age`, or leaves frame) while still inside the zone, no exit event ever fires. `entries - exits` as a live occupancy count will overcount in that case.
+
+Verified with two websocket-pipeline integration tests, using a detector that steps a box 40px/frame (under `centroid_max_dist`'s 56px threshold for a 640x480 frame, so the same track ID survives the crossing) from outside the zone to inside, and the reverse. Confirms the event fires exactly once and `occupancy` reflects it correctly.
+
 ### Entryway demo
 
 `results/video/entryway_tracked.mp4` (source: ["Delivery man delivering order"](https://www.pexels.com/video/delivery-man-delivering-order-6667223/) by Kampus Production, Pexels License). Track ID stays stable throughout the clip. Frames 41-47 (~0.28s) briefly show two overlapping tracks for the same person, due to detector producing two candidate boxes for one person with insufficient IoU overlap for NMS threshold to merge them. This self-corrects in 7 frames.
@@ -76,18 +108,29 @@ With the original `max_age=8`, 75.8% of all track deaths on video of a crowded s
 
 ## Benchmark
 
+### Demo model (hand-built CNN, all four variants)
+
+`scripts/benchmark.py` builds and benchmarks four variants: FP32 baseline, INT8 dynamic, INT8 static (calibrated, not just dynamic), and FP16. Predictions based on theory:
+
+- **Static should beat dynamic.** Dynamic recomputes each op's activation scale every single inference, while static pre-computes it once from a calibration set, so inference itself pays no calibration cost.
+- **FP16 shouldn't help latency on CPU, only size.** FP16's speed win occurs with GPU tensor cores. Most CPUs have no fast native FP16 compute path, so `onnxruntime` must usually upcast back to FP32 internally to actually run the ops, which is a cast cost with no compute benefit.
+
+Demo model, one run in a sandboxed CPU environment (absolute numbers here aren't to be trusted due to noise, only checked for direction):
+
 | variant | size (KB) | mean latency (ms) | p95 (ms) | fps |
 |---|---|---|---|---|
-| fp32 | 114.3 | 1.38 | 1.736 | 722.2 |
-| int8 | 33.6 | 3.83 | 4.65 | 261.0 |
+| fp32 | 114.3 | 0.530 | 0.632 | 1884.0 |
+| int8_dynamic | 33.6 | 0.861 | 0.973 | 1160.0 |
+| int8_static | 34.6 | 0.665 | 0.900 | 1502.6 |
+| fp16 | 57.9 | 0.567 | 0.660 | 1761.9 |
 
-Size dropped 70%, but latency didn't improve. Dynamic quantization adds a dequantize step around every op, and on a small model that overhead is bigger than what you save doing the matmuls in int8. Thus, the effect of quantization on speed depends on the model being deep enough that the compute savings outweigh the added ops. Static quantization with a calibration set would probably behave differently, but I haven't tested that yet.
+Size dropped ~70% for int8, but latency didn't improve for either int8 variant. Quantization adds a dequantize step around every op, and on a network this small (a few thousand params) that overhead is bigger than the latency saved doing the matmuls in int8. Both predictions held: int8_static (0.80x fp32 latency) beat int8_dynamic (0.62x) by removing the live calibration cost, and fp16 was 0.94x, basically the same or slightly slower due to the internal cast on CPU. Size dropped ~49% for fp16 as expected with no compute win.
 
-This benchmark runs on a small CNN built by hand with `onnx.helper`. To benchmark a real model, swap `MODEL_PATH` and bump `input_shape` to 640x640. Weights are seeded so the model itself is identical every run, but the absolute latency numbers move around depending on what else is running on the machine at the time, with swings of 2x+ between a quiet machine and a loaded one. The size reduction and the direction of the latency result (int8 slower, not faster) held steady across every run though.
+This benchmark runs on a small CNN built by hand with `onnx.helper`. To benchmark a real model, pass `--model` and bump `--input-size` to 640. Weights are seeded so the model itself is identical every run, but the absolute latency numbers move around depending on what else is running on the machine at the time, with swings of 2x+ between a quiet machine and a loaded one. The size reduction and the direction of the int8 latency result (slower on this demo model) were constants across every run though.
 
 HOG on its own runs about 154ms/frame (roughly 6.5fps) at 640px on a regular CPU, averaged over 20 runs after warmup.
 
-### Same benchmark, on the real yolov8n
+### yolov8n (Initial benchmark)
 
 Once yolov8n.onnx was actually exported and the same FP32 vs INT8 comparison reran against it instead of the hand-built demo model, the result flipped:
 
@@ -96,9 +139,30 @@ Once yolov8n.onnx was actually exported and the same FP32 vs INT8 comparison rer
 | fp32 | 12550 | 94.3 | 10.6 |
 | int8 | 3422 | 65.6 | 15.2 |
 
-INT8 is 1.44x faster here, because the dequant overhead is roughly fixed per op, but the compute it's saving scales with the model's actual size. On a network this small (a few thousand params) that overhead dominates, while on yolov8n (3.1M params, 8.7 GFLOPs) there's enough matmul work that quantizing it is a net win. A model's compute density is what determines whether quantization helps or hurts latency. See `results/benchmark_real_model.csv`.
+INT8 is 1.44x faster here, because the dequant overhead is roughly fixed per op, but the compute it's saving scales with the model's actual size. On a network this small (a few thousand params) that overhead dominates, while on yolov8n (3.1M params, 8.7 GFLOPs) there's enough matmul work that quantizing it is a net win. A model's compute density is what determines whether quantization helps or hurts latency. 
 
-However, the same comparison on different CPU hardware (AMD Ryzen 5 7520U vs. the machine above) came out the other way, int8 slightly slower (356ms vs 403ms fp32, 0.88x). Quantization's payoff depends on the specific CPU's int8 vs fp32 throughput characteristics, not just the model, could test this further (e.g on a Raspberry Pi).
+However, the same comparison on different CPU hardware (AMD Ryzen 5 7520U vs. the machine above) came out the other way, int8 slightly slower (403ms vs 356ms fp32, 0.88x) in an earlier partial run. Quantization's payoff depends on the specific CPU's int8 vs fp32 throughput characteristics, not just the model.
+
+### yolov8n, all four variants (Ryzen 5 7520U)
+
+Full run on Ryzen 5 7520U, all four variants against the real `yolov8n.onnx`:
+
+| variant | size (KB) | mean latency (ms) | p95 (ms) | fps |
+|---|---|---|---|---|
+| fp32 | 12550 | 178.1 | 185.6 | 5.6 |
+| int8_dynamic | 3422 | 208.0 | 250.4 | 4.8 |
+| int8_static | 3440 | 226.1 | 314.4 | 4.4 |
+| fp16 | 6312 | 149.7 | 166.7 | 6.7 |
+
+*fp32's absolute number moved from 356ms (the intiial benchmark) to 178ms here on the same CPU model and code in a different session, showing the noise present. Ratios between variants within the same run are what's used to compare rather than the absolute ms.*
+
+Both int8 variants were slower than fp32 on this CPU, which is consistent in direction with the initial benchmark, strengthening the idea that this CPU's int8 throughput is less than its fp32 throughput, regardless of which int8 variant.
+
+**int8_static came out slower than int8_dynamic here (0.79x vs 0.86x fp32 latency)** which is the opposite of both the stated prediction (static should beat dynamic by skipping live calibration) and the demo-model result where static did beat dynamic. On yolov8n's larger, conv-heavy architecture, the static graph's QDQ node pattern may not be fusing into efficient int8 execution kernels the way this CPU's dynamic-quant path does, or synthetic-noise calibration (used here since this script measures latency/size, not accuracy, see `RandomCalibrationDataReader`) may be picking clipping ranges that add overhead somewhere the demo model's much smaller graph never exercised. 
+
+**fp16 was faster here (1.19x)** However, this comparison has a confound in that unlike the other three variants which are all derived from the same plain ONNX export via `quantize_dynamic_int8`/`quantize_static`, the fp16 model came from Ultralytics' native export pipeline (`yolo export ... quantize=True`) after `onnxconverter_common`'s post-hoc conversion was found to be broken for this architecture. ONNX's validator rejects converting `Resize`'s scale input to fp16, and the library's boundary-Cast insertion around a correctly-blocked `Resize` is broken for this specific graph. The native export pipeline also ran `onnxslim` (operator fusion, redundant-node elimination) as part of exporting, which the other three variants never received. So this 1.19x is a result of fp16-export-plus-graph-optimization together, not fp16 precision in isolation. This benchmark supports the idea that the natively fp16-exported model was faster, not that fp16 precision helped.Disentangling them would require benchmarking an `onnxslim`-optimized fp32 model too.
+
+See `results/benchmark_real_model.csv` for the full real run.
 
 ## Architecture / design decisions
 
@@ -114,11 +178,13 @@ However, the same comparison on different CPU hardware (AMD Ryzen 5 7520U vs. th
 
 ## Tests
 
-30 tests, `pip install pytest fakeredis && pytest tests/ -v`:
+60 tests, `pip install pytest fakeredis && pytest tests/ -v`:
 - `test_detector.py`: NMS (suppression, survival, empty input, partial overlap below threshold)
-- `test_tracker.py`: track confirmation gating (`min_hits`), surviving a one-frame gap under the same ID (the actual flicker fix, proven directly), expiry after `max_age` consecutive misses, two well-separated tracks not swapping IDs, and a track's label/confidence reflecting the real matched detection rather than a placeholder
-- `test_alerts.py`: `Zone.overlaps_box`'s four separation directions plus edge-touching, `AlertManager`'s cooldown/dedup logic via `fakeredis`
-- `test_main.py`: FastAPI route coverage (`/health`, `/alerts/recent`) via `TestClient`, plus a full end-to-end integration test (`test_alert_full_pipeline`) that fakes a detection and a frame source to prove a real detection crossing the zone actually fires an alert through the live websocket route (across enough frames for the track to confirm) and lands in `/alerts/recent` afterward
+- `test_tracker.py`: track confirmation gating (`min_hits`), surviving a one-frame gap under the same ID, expiry after `max_age` consecutive misses, two well-separated tracks not swapping IDs, a track's label/confidence reflecting the real matched detection rather than a placeholder, `stationary_frames`/`has_moved`, and `alive_track_ids()` across unconfirmed/gapped/expired tracks
+- `test_alerts.py`: `Zone.overlaps_box`'s four separation directions plus edge-touching, `AlertManager`'s cooldown/dedup logic via `fakeredis` (including per-`alert_type` cooldown separation), and `EntryExitCounter`'s entry/exit/no-event/pruning/multi-track cases
+- `test_main.py`: FastAPI route coverage (`/health`, `/alerts/recent`) via `TestClient`, plus full end-to-end integration tests through the websocket route: a detection crossing the zone firing an alert and landing in `/alerts/recent` (`test_alert_full_pipeline`), loitering firing/not-firing for a moving-then-still vs always-static track, and entry/exit events + occupancy counts firing correctly for a track walking into and out of the zone
+- `test_check_accuracy.py`: `bootstrap_ci()` degenerate cases collapsing to exactly zero-width CIs (single image or all images identical), the point estimate being the real aggregate independent of seed/resample count, agreement with an independent non-vectorized reference implementation, a wider sample producing a tighter interval, and the zero-denominator resample edge case resolving to 0.0 instead of crashing
+- `test_benchmark.py`: `RandomCalibrationDataReader`'s contract, it must yield exactly `num_samples` samples then `None`, correct shape/dtype/key per sample
 
 ## Running it
 
@@ -153,11 +219,10 @@ This is a benchmarking harness and an alerting service, not an on-device deploym
 ## TODO / known gaps
 
 - HOG is not very accurate, it's there because it needs no download. I would use the ONNX path for anything real
-- accuracy eval is on a 40-image sample. This is worth widening for tighter confidence intervals
+- multi-class detection for a package-left-then-taken compound event. `Track.label` was already added specifically to support this later, not yet built
 - no auth on the websocket or `/demo/detect`
 - alert history is just whatever's in Redis's bounded list, nothing persisted long term
 - single camera only right now
 - zone is still a computed default (`default_zone_for_resolution`), not yet user-configurable per camera -- correct across resolutions now, but a real deployment would want this drawn by a user in a setup UI, not any default at all
-- want to try static quantization + FP16 and see if the int8-helps result holds up further
 - dense-crowd scenes are still alimitation for a motion-only tracker, to fix would add re-identification embedding.
 - tiled/sliding-window inference for dense-crowd *detection* (as opposed to tracking) also not yet tried
