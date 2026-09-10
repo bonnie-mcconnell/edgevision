@@ -1,11 +1,13 @@
 __pycache__/
 *.pyc
 .venv/
+yolo-export-venv/
 models/*.onnx
 dump.rdb
 
 results/*
 !results/benchmark.csv
+!results/becnchmark_demo.csv
 !results/benchmark_real_model.csv
 !results/examples/
 !results/demo_entryway.gif

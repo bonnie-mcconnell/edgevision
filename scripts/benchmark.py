@@ -37,16 +37,15 @@ def convert_to_fp16(fp32_path: str, fp16_path: str) -> None:
     fp32 internally to run operations.
     """
     model = onnx.load(fp32_path)
-    model_fp16 = float16.convert_float_to_float16(model, op_block_list=["Resize", "Concat"])
+    model_fp16 = float16.convert_float_to_float16(model)
     onnx.save(model_fp16, fp16_path)
 
 
 def preprocess_for_static_quant(fp32_path: str, preprocessed_path: str) -> None:
-    """
-    quantize_static() warns without this because it needs shape inference
-    run over the graph first to place quantization nodes correctly, 
-    especially around Conv layers.
-    """
+    """quantize_static() warns without this: it needs shape inference run
+    over the graph first to place quantization nodes correctly, especially
+    around Conv layers. Mechanical prerequisite step, not optional despite
+    quantize_static() technically running without it."""
     quant_pre_process(fp32_path, preprocessed_path)
 
 
@@ -54,6 +53,7 @@ def benchmark_model(model_path: str, input_shape: tuple) -> dict:
     session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
     input_info = session.get_inputs()[0]
     input_name = input_info.name
+    # detect input type from model's input info so it works on yolov8n & demo
     dtype = np.float16 if "float16" in input_info.type else np.float32
     dummy_input = np.random.randn(*input_shape).astype(dtype)
 
@@ -94,8 +94,8 @@ class RandomCalibrationDataReader(CalibrationDataReader):
         self.count = 0
 
     def get_next(self) -> dict | None:
-        """Called by quantize_static() repeatedly until it returns None.
-        Every non-None return is one calibration sample: {input_name: array}."""
+        """Called repeatedly by quantize_static() until it returns None.
+        Each non-None return is one calibration sample: {input_name: array}."""
         if self.count >= self.num_samples:
             return None
         self.count += 1
@@ -110,6 +110,10 @@ def parse_args() -> argparse.Namespace:
                          help="Square input size in pixels: 224 for the demo model, 640 for yolov8n.")
     parser.add_argument("--out", default="results/benchmark.csv",
                          help="Where to write the results CSV.")
+    parser.add_argument("--fp16-model", default=None,
+                         help="Path to an already fp16-exported model (e.g. `yolo export model=yolov8n.pt "
+                              "format=onnx half=True`), used instead of post-hoc fp32->fp16 conversion via "
+                              "convert_to_fp16().")
     return parser.parse_args()
 
 
@@ -148,8 +152,14 @@ def main() -> None:
         calibration_data_reader=calibration_reader,
     )
 
-    print(f"Converting to fp16 -> {fp16_path} ...")
-    convert_to_fp16(model_path, fp16_path)
+    if args.fp16_model:
+        if not os.path.exists(args.fp16_model):
+            raise SystemExit(f"--fp16-model path {args.fp16_model} doesn't exist.")
+        print(f"Using pre-exported fp16 model: {args.fp16_model} (skipping post-hoc conversion)")
+        fp16_path = args.fp16_model
+    else:
+        print(f"Converting to fp16 -> {fp16_path} ...")
+        convert_to_fp16(model_path, fp16_path)
 
     variants = [
         ("fp32", model_path),
