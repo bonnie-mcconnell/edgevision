@@ -1,12 +1,9 @@
 import fakeredis
 import pytest
 
-from app.alerts import AlertManager, EntryExitCounter, Zone
-from app.tracker import Track
-
-
-OUTSIDE_BOX = (0, 150, 50, 250)   #left of zone (x1=100..x2=300)
-INSIDE_BOX = (150, 150, 250, 250)
+from app.alerts import AlertManager, EntryExitCounter, PackageMonitor, Zone
+from app.tracker import Track, Tracker
+from app.detector import Detection
 
 
 def make_track(track_id, box, first_seen_frame=1):
@@ -117,6 +114,10 @@ def test_recent_alerts_zero_limit_returns_empty(alert_manager):
     assert alert_manager.recent_alerts(limit=0) == []
 
 
+OUTSIDE_BOX = (0, 150, 50, 250)   # entirely left of zone (x1=100-x2=300)
+INSIDE_BOX = (150, 150, 250, 250)
+ 
+
 def test_first_observation_does_not_fire_event(zone):
     counter = EntryExitCounter()
     track = make_track(1, INSIDE_BOX)
@@ -184,3 +185,103 @@ def test_entries_and_exits_accumulate_across_multiple_tracks(zone):
     assert {"track_id": 2, "event": "exit"} in events
     assert counter.entries == 1
     assert counter.exits == 1
+
+
+def make_package_det(box, label="backpack"):
+    return Detection(label=label, confidence=0.9, x1=box[0], y1=box[1], x2=box[2], y2=box[3])
+
+
+def test_package_left_fires_after_stationary_time(zone):
+    tracker = Tracker(min_hits=1)
+    monitor = PackageMonitor(left_seconds=0.1)
+    det = make_package_det(INSIDE_BOX)
+    fps = 10.0 #1 frame = 0.1s
+
+    tracks = tracker.update([det])
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    assert events == [] # stationary_frames still 0
+
+    tracks = tracker.update([det])
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    assert len(events) == 1
+    assert events[0]["event"] == "left"
+    assert events[0]["label"] == "backpack"
+    assert monitor.left_count == 1
+
+def test_left_does_not_refire_once_already_flagged(zone):
+    tracker = Tracker(min_hits=1)
+    monitor = PackageMonitor(left_seconds=0.1)
+    det = make_package_det(INSIDE_BOX)
+    fps = 10.0
+
+    tracker.update([det])
+    tracks = tracker.update([det])
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    assert len(events) == 1
+
+    tracks = tracker.update([det])
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    assert len(events) == []
+    assert monitor.left_count == 1
+
+
+def test_package_taken_fires_after_flagged_track_dies(zone):
+    tracker = Tracker(min_hits=1, max_age=2)
+    monitor = PackageMonitor(left_seconds=0.1)
+    det = make_package_det(INSIDE_BOX)
+    fps = 10.0
+
+    tracker.update([det])
+    tracks = tracker.update([det])
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    left_track_id = events[0]["track_id"]
+
+    tracker.update([])
+    tracker.update([])
+    tracks = tracker.update([]) # 3 empty updates > max_age =2, track dead now
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    assert events == [{"track_id": left_track_id, "event": "taken", "label": "backpack", "confidence": 0.9}]
+    assert monitor.taken_count == 1
+
+def test_taken_never_fires_for_package_never_flagged_left(zone):
+    # package that dissapears before reaching left_seconds threshold.
+    tracker = Tracker(min_hits=1, max_age=1)
+    monitor = PackageMonitor(left_seconds=100.0)
+    det = make_package_det(INSIDE_BOX)
+    fps = 10.0
+
+    tracker.update([det])
+    tracks = tracker.update([det])
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    assert events == []
+
+    tracker.update([])
+    tracks = tracker.update([]) # track dies
+    events = monitor.update(tracks, zone, tracker, fps, tracker.track_alive_ids())
+    assert events == []
+    assert monitor.taken_count == 0
+
+
+def test_package_outside_zone_not_flagged(zone):
+    tracker = Tracker(min_hits=1)
+    monitor = PackageMonitor(left_seconds=0.1)
+    det = make_package_det(OUTSIDE_BOX)
+    fps = 10.0
+
+    tracker.update([det])
+    tracks = tracker.update([det])
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    assert events == []
+    assert monitor.left_count == 0
+
+
+def test_non_package_label_ignored(zone):
+    tracker = Tracker(min_hits=1)
+    monitor = PackageMonitor(left_seconds=0.1)
+    det = make_package_det(INSIDE_BOX, label="person")
+    fps = 10.0
+
+    tracker.update([det])
+    tracks = tracker.update([det])
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
+    assert events == []

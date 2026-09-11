@@ -253,3 +253,60 @@ def test_loitering_alert_doesnt_fire_for_false_positive():
                 assert loitering_fired is False
     finally:
         main_module.app.dependency_overrides.clear()
+
+
+class FakePackageThenGoneDetector:
+    """
+    Backpack inside zone long enouhg to be flagged 'left'
+    then dissapears, long enough to exceed max_age and be
+    flagged 'taken.
+    """
+    def __init__(self, left_frames):
+        self.frame_num = 0
+        self.left_frames = left_frames
+
+    def detect(self, frame):
+        self.frame_num += 1
+        if self.frame_num <= self.left_frames:
+            det = Detection(label="backpack", confidence=0.9, x1=250, y1=100, x2=310, y2=200)
+            return [det], 0.01
+        return [], 0.01
+
+
+def test_package_left_then_taken():
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    shared_alert_manager = AlertManager(fake_redis, cooldown_seconds=30)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    left_frames = 151 # (151-1)/30 = 5.0s crosses PACKAGE_LEFT_SECONDS
+    num_frames = left_frames + 10 # + empty frames to exceed max_age=8
+
+    main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
+    main_module.app.dependency_overrides[deps.get_detector] = lambda: FakePackageThenGoneDetector(left_frames)
+    main_module.app.dependency_overrides[deps.get_frame_source] = lambda: FakeFrameSource([frame] * num_frames)
+
+    try:
+        with TestClient(main_module.app) as test_client:
+            with test_client.websocket_connect("/ws/detections") as ws:
+                left_events = []
+                taken_events = []
+                taken_alert_fired = False
+                last_packages_count = None
+
+                for _ in range(num_frames):
+                    data = ws.receive_json()
+                    left_events += [e for e in data["package_events"] if e["event"] == "left"]
+                    taken_events += [e for e in data["package_events"] if e["event"] == "taken"]
+                    for alert in data["alerts"]:
+                        if alert["alert_type"] == "package_taken":
+                            taken_alert_fired = True
+                    last_packages_count = data["packages"]
+
+                assert len(left_events) == 1
+                assert left_events[0]["label"] == "backpack"
+                assert len(taken_events) == 1
+                assert taken_alert_fired
+                assert last_packages_count == {"left": 1, "taken": 1}
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+
