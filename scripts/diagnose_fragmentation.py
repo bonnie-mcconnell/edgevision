@@ -10,7 +10,7 @@ import csv
 
 import cv2
 
-from app.detector import OnnxPersonDetector
+from app.detector import OnnxDetector
 from app.tracker import Tracker
 
 
@@ -32,7 +32,7 @@ def main():
     if not cap.isOpened():
         raise SystemExit(f"Couldn't open {VIDEO_SOURCE}")
 
-    detector = OnnxPersonDetector("models/yolov8n.onnx")
+    detector = OnnxDetector("models/yolov8n.onnx")
     tracker = Tracker()
 
     death_events = [] # (track_id, death_frame, last_box)

@@ -26,7 +26,7 @@ class HogPersonDetector:
 
     def __init__(self, target_width: int = 640):
         self.hog = cv2.HOGDescriptor()
-        # opencv-python's .pyi stubs don't cover every auto-generated C++ binding, this one is verified to work.
+        # opencv-python's .pyi stubs don't cover every auto-generated C++ binding
         self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector()) # type: ignore[attr-defined]
         self.target_width = target_width
 
@@ -56,12 +56,36 @@ class HogPersonDetector:
         return detections, elapsed
 
 
-class OnnxPersonDetector:
+# standard 80-class COCO label order, index-matched to model's output
+# no literal package/box/parcel class exists in COCO, closest available
+# are backpack/suitcase/handbag. So this is approximation of package-monitoring
+# feature, not production ready.
+COCO_CLASSES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush",
+]
+
+PACKAGE_CLASSES = {"backpack", "suitcase", "handbag"}
+
+
+class OnnxDetector:
     """YOLOv8 onnx model via onnxruntime. Output shape is (1, 84, 8400) for COCO."""
 
-    COCO_PERSON_CLASS_ID = 0  # "person" is class 0 in COCO
-
-    def __init__(self, model_path: str, input_size: int = 640, conf_threshold: float = 0.4):
+    def __init__(self, model_path: str, 
+                input_size: int = 640, 
+                conf_threshold: float = 0.4,
+                classes: set[str] | None = None,
+        ):
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"No ONNX model at {model_path}. Export one with:\n"
@@ -76,6 +100,14 @@ class OnnxPersonDetector:
         self.input_name = self.session.get_inputs()[0].name
         self.input_size = input_size
         self.conf_threshold = conf_threshold
+
+        # classes=None keeps existing callers (scripts) working the same/hardcoded
+        # person only detection, same as before multi-class change
+        classes = classes if classes is not None else {"person"}
+        unknown = classes - set(COCO_CLASSES)
+        if unknown:
+            raise ValueError(f"Unknown COCO class name(s): {unknown}")
+        self.class_ids = {COCO_CLASSES.index(name) for name in classes}
 
     def _preprocess(self, frame: np.ndarray) -> tuple[np.ndarray, float, float, float]:
         """
@@ -112,10 +144,11 @@ class OnnxPersonDetector:
         class_scores = preds[:, 4:]
         class_ids = np.argmax(class_scores, axis=1)
         confidences = class_scores[np.arange(len(class_scores)), class_ids]
-        keep_mask = (class_ids == self.COCO_PERSON_CLASS_ID) & (confidences >= self.conf_threshold)
+        keep_mask = np.isin(class_ids, list(self.class_ids)) & (confidences >= self.conf_threshold)
 
         boxes = preds[keep_mask, :4]
         confidences = confidences[keep_mask]
+        kept_class_ids = class_ids[keep_mask]
 
         # undo letterbox padding, then the resize scale to get back to
         # original frame coordinates
@@ -126,16 +159,36 @@ class OnnxPersonDetector:
         y2 = (cy + bh / 2 - pad_y) / scale
 
         detections = [
-            Detection("person", float(conf), float(a), float(b), float(c), float(d))
-            for conf, a, b, c, d in zip(confidences, x1, y1, x2, y2)
+            Detection(COCO_CLASSES[cid], float(conf), float(a), float(b), float(c), float(d))
+            for cid, conf, a, b, c, d in zip(kept_class_ids, confidences, x1, y1, x2, y2)
         ]
         return self._nms(detections), elapsed
 
     @staticmethod
     def _nms(detections: list[Detection], iou_threshold: float = 0.45) -> list[Detection]:
-        """Non-max suppression: collapse overlapping boxes for the same object."""
+        """
+        Non-max suppression: collapse overlapping boxes for the same object.
+        Applied per label so that a person and a backpack can overlap in the same frame.
+        Calls the single class version of this function safely.
+        """
         if not detections:
             return []
+
+        by_label: dict[str, list[Detection]] = {}
+        for det in detections:
+            by_label.setdefault(det.label, []).append(det)
+
+        kept: list[Detection] = []
+        for label_group in by_label.values():
+            kept.extend(OnnxDetector._nms_single_class(label_group, iou_threshold))
+        return kept
+
+    @staticmethod
+    def _nms_single_class(detections: list[Detection], iou_threshold: float = 0.45) -> list[Detection]:
+        """Non-max suppression: collapse overlapping boxes for the same object."""  
+        if not detections:
+            return []
+        
         boxes = np.array([[d.x1, d.y1, d.x2, d.y2] for d in detections])
         scores = np.array([d.confidence for d in detections])
         order = scores.argsort()[::-1]
@@ -158,12 +211,12 @@ class OnnxPersonDetector:
         return [detections[i] for i in keep]
 
 
-def build_detector() -> HogPersonDetector | OnnxPersonDetector:
+def build_detector() -> HogPersonDetector | OnnxDetector:
     """Factory: picks the detector based on DETECTOR_BACKEND env var."""
     backend = os.environ.get("DETECTOR_BACKEND", "hog").strip().lower()
     if backend == "onnx":
         model_path = os.environ.get("ONNX_MODEL_PATH", "models/yolov8n.onnx")
-        return OnnxPersonDetector(model_path)
+        return OnnxDetector(model_path, classes={"person"} | PACKAGE_CLASSES)
     if backend != "hog":
         raise ValueError(f"Unknown DETECTOR_BACKEND: {backend!r}. Expected 'hog' or 'onnx'.")
     return HogPersonDetector()

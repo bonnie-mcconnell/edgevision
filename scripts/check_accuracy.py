@@ -1,4 +1,4 @@
-"""Evaluates OnnxPersonDetector's precision/recall against a labeled COCO
+"""Evaluates OnnxDetector's precision/recall against a labeled COCO
 val2017 person subset, sweeping confidence thresholds to show the
 precision/recall tradeoff.
 
@@ -14,7 +14,7 @@ import json
 import cv2
 import numpy as np
 
-from app.detector import OnnxPersonDetector, Detection
+from app.detector import OnnxDetector, Detection
 
 
 def iou(box_a: tuple, box_b: tuple) -> float:
@@ -90,7 +90,7 @@ def match_detections(detections: list[Detection], ground_truth_boxes: list[tuple
 
 
 def evaluate(conf_threshold: float, ground_truths: dict, images_dir: str, verbose: bool = False) -> tuple[float, float, int, int, int, list[tuple[int, int, int]]]:
-    detector = OnnxPersonDetector("models/yolov8n.onnx", 640, conf_threshold)
+    detector = OnnxDetector("models/yolov8n.onnx", 640, conf_threshold)
     total_tp, total_fp, total_fn = 0, 0, 0
     per_image_results: list[tuple[int, int, int]] = []  # (tp, fp, fn), one entry per image, the bootstrap resampling unit
 

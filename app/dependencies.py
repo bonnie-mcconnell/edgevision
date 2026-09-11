@@ -6,7 +6,7 @@ from fastapi import Depends
 from functools import lru_cache
 
 from app.alerts import AlertManager
-from app.detector import HogPersonDetector, OnnxPersonDetector, build_detector
+from app.detector import HogPersonDetector, OnnxDetector, build_detector
 
 
 @lru_cache
@@ -27,7 +27,7 @@ def get_alert_manager(redis_client: redis.Redis = Depends(get_redis_client)) -> 
 
 
 @lru_cache
-def get_detector() -> HogPersonDetector | OnnxPersonDetector:
+def get_detector() -> HogPersonDetector | OnnxDetector:
     return build_detector()
 
 

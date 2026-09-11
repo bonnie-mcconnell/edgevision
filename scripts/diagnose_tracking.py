@@ -12,7 +12,7 @@ import os
 
 import cv2
 
-from app.detector import OnnxPersonDetector
+from app.detector import OnnxDetector
 from app.tracker import Tracker, _build_score_matrix, _iou, _centroid_dist
 
 
@@ -31,7 +31,7 @@ def main() -> None:
             f"  current working directory: {os.getcwd()}\n"
         )
     
-    detector = OnnxPersonDetector("models/yolov8n.onnx")
+    detector = OnnxDetector("models/yolov8n.onnx")
     tracker = Tracker()
 
     os.makedirs("results", exist_ok=True)

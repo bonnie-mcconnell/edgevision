@@ -4,7 +4,7 @@ import time
 import cv2
 
 from app.alerts import LOITERING_SECONDS
-from app.detector import OnnxPersonDetector
+from app.detector import OnnxDetector
 from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution
 from app.drawing import draw_detections, draw_tracks
 
@@ -47,7 +47,7 @@ def main() -> None:
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    detector = OnnxPersonDetector("models/yolov8n.onnx")
+    detector = OnnxDetector("models/yolov8n.onnx")
     tracker = Tracker(
         centroid_max_dist=centroid_max_dist_for_resolution(width, height),
         stationary_threshold=stationary_move_threshold_for_resolution(width, height),
