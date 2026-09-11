@@ -221,7 +221,7 @@ def test_left_does_not_refire_once_already_flagged(zone):
 
     tracks = tracker.update([det])
     events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
-    assert len(events) == []
+    assert events == []
     assert monitor.left_count == 1
 
 
@@ -257,7 +257,7 @@ def test_taken_never_fires_for_package_never_flagged_left(zone):
 
     tracker.update([])
     tracks = tracker.update([]) # track dies
-    events = monitor.update(tracks, zone, tracker, fps, tracker.track_alive_ids())
+    events = monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
     assert events == []
     assert monitor.taken_count == 0
 
