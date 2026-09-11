@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 
 import redis
 
-from app.tracker import Track
+from app.detector import PACKAGE_CLASSES
+from app.tracker import Track, Tracker
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,57 @@ def default_zone_for_resolution(width: float, height: float, name: str = "front_
 
 # TODO: to be tuned
 LOITERING_SECONDS = 10.0
+PACKAGE_LEFT_SECONDS = 5.0
+
+
+class PackageMonitor:
+    """
+    Tracks package-class objects through left -> taken.
+    "left" fires once a package track has sat stationary in the zone
+    for PACKAGE_LEFT_SECONDS, "taken" fires when a previously flagged 
+    package's track is no longer alive.
+
+    Doesn't gate on has_moved() as it could only be picked up once it's
+    been left, but alos means that a permanently static misdetection looks
+    identical to a real left package. Would need a longer PACKAGE_LEFT_SECONDS
+    or class-confidence stability check across frames to fix.
+    """
+    def __init__(self, left_seconds: float = PACKAGE_LEFT_SECONDS):
+        # track_id: (label, confidence) when left fires
+        self._flagged_left: dict[int, tuple[str, float]] = {}
+        self.left_seconds = left_seconds
+        self.left_count = 0
+        self.taken_count = 0
+
+    def update(self, tracks: list[Track], zone: Zone, tracker: Tracker, fps: float, alive_ids: set[int]) -> list[dict]:
+        """
+        Call once per frame with the tracker's confirmed tracks. Returns list of
+        {"track_id": int, "event": "left"|"taken", "label": str, "confidence": float}
+        for transitions detected this frame. "taken" events carry the label/confidence
+        remembered from when "left" fired because the track no longer exists at that point.
+        """
+        events = []
+
+        taken_ids = set(self._flagged_left) - alive_ids
+        for tid in taken_ids:
+            label, confidence = self._flagged_left.pop(tid)
+            self.taken_count += 1
+            events.append({"track_id": tid, "event": "taken", "label": label, "confidence": confidence})
+
+        for track in tracks:
+            if track.label not in PACKAGE_CLASSES:
+                continue 
+            if track.track_id in self._flagged_left:
+                continue
+            if not zone.overlaps_box(*track.box):
+                continue
+            stationary_seconds = tracker.stationary_frames(track) / fps
+            if stationary_seconds >= self.left_seconds:
+                self._flagged_left[track.track_id] = (track.label, track.confidence)
+                self.left_count += 1
+                events.append({"track_id": track.track_id, "event": "left", "label": track.label, "confidence": track.confidence})
+
+        return events
 
 
 class EntryExitCounter:

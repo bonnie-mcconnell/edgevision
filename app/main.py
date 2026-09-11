@@ -14,9 +14,9 @@ from fastapi.responses import FileResponse, Response
 from contextlib import asynccontextmanager
 import numpy as np
 
-from app.alerts import AlertManager, EntryExitCounter, default_zone_for_resolution, LOITERING_SECONDS
+from app.alerts import AlertManager, EntryExitCounter, PackageMonitor, default_zone_for_resolution, LOITERING_SECONDS
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
-from app.detector import HogPersonDetector, OnnxPersonDetector
+from app.detector import HogPersonDetector, OnnxDetector
 from app.drawing import draw_detections
 from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution
 
@@ -37,7 +37,7 @@ app = FastAPI(title="EdgeVision", lifespan=lifespan)
 
 
 @app.get("/health")
-def health(detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector)) -> dict:
+def health(detector: HogPersonDetector | OnnxDetector = Depends(get_detector)) -> dict:
     return {"status": "ok", "detector_backend": type(detector).__name__}
 
 
@@ -70,7 +70,7 @@ def benchmark_results() -> dict:
 async def demo_detect(
     file: UploadFile = File(...),
     format: str = "image", # or 'json'
-    detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector),
+    detector: HogPersonDetector | OnnxDetector = Depends(get_detector),
 ):
     """Post an image to this endpoint, get back detections as JSON or an annotated image."""
     t0 = time.perf_counter()
@@ -117,7 +117,7 @@ async def websocket_detections(
     websocket: WebSocket, 
     include_frame: bool = False,
     alert_manager: AlertManager = Depends(get_alert_manager), 
-    detector: HogPersonDetector | OnnxPersonDetector = Depends(get_detector), 
+    detector: HogPersonDetector | OnnxDetector = Depends(get_detector), 
     cap: cv2.VideoCapture = Depends(get_frame_source)
     ):
     """Streams detections+alerts. Needs VIDEO_SOURCE set to a webcam index or RTSP url."""
@@ -137,6 +137,7 @@ async def websocket_detections(
             )
         zone = default_zone_for_resolution(frame_width, frame_height)
         entry_exit_counter = EntryExitCounter()
+        package_monitor = PackageMonitor()
 
         while True:
             read_start = time.perf_counter()
@@ -156,8 +157,16 @@ async def websocket_detections(
             track_done = time.perf_counter()
 
             crossing_events = entry_exit_counter.update(tracks, zone, tracker.alive_track_ids())
+            package_events = package_monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
 
             fired_alerts = []
+            for pkg_event in package_events:
+                if pkg_event["event"] == "taken":
+                    taken_alert = alert_manager.raise_if_new(
+                        zone.name, pkg_event["label"], pkg_event["confidence"], alert_type="package_taken"
+                    )
+                    if taken_alert:
+                        fired_alerts.append(taken_alert.to_dict())
             for track in tracks:
                 if zone.overlaps_box(*track.box):
                     alert = alert_manager.raise_if_new(zone.name, track.label, track.confidence, alert_type="zone_entry")
@@ -185,6 +194,8 @@ async def websocket_detections(
                 "zone": {"name": zone.name, "x1": zone.x1, "y1": zone.y1, "x2": zone.x2, "y2": zone.y2},
                 "crossing_events": crossing_events,
                 "occupancy": {"entries": entry_exit_counter.entries, "exits": entry_exit_counter.exits},
+                "package_events": package_events,
+                "packages": {"left": package_monitor.left_count, "taken": package_monitor.taken_count},
                 "inference_ms": round(elapsed_s * 1000, 2),
                 "alerts": fired_alerts,
                 "timing": {       # inference_ms kept for backward compat with existing consumers, timing gives the fuller breakdown
