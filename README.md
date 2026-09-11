@@ -16,7 +16,7 @@ A video frame arrives, a detector finds people, a lightweight tracker links dete
 
 ## Accuracy
 
-Evaluated `OnnxPersonDetector` (real yolov8n.onnx) against a 200-image labeled subset of COCO val2017 (person class only, seeded sample, see `scripts/fetch_coco_subset.py`), matching predictions to ground truth via IoU ≥ 0.5, with a bootstrapped 95% CI at each threshold (`scripts/check_accuracy.py`):
+Evaluated `OnnxDetector` (real yolov8n.onnx) against a 200-image labeled subset of COCO val2017 (person class only, seeded sample, see `scripts/fetch_coco_subset.py`), matching predictions to ground truth via IoU ≥ 0.5, with a bootstrapped 95% CI at each threshold (`scripts/check_accuracy.py`):
 
 | conf threshold | precision [95% CI] | recall [95% CI] | tp | fp | fn |
 |---|---|---|---|---|---|
@@ -53,7 +53,7 @@ The `/live` browser view and the `/ws/detections` websocket both report a per-fr
 
 ## Tracking
 
-Added a lightweight IoU/centroid tracker on top of raw per-frame detection, which fixed the box-flicker effect found earlier. Instead of every frame being detected in isolation, `Tracker.update()` links detections across frames into persistent tracked boxes with their own `track_id`. The websocket payload and zone-alerting key off tracked, not raw, detections.
+Added a lightweight IoU/centroid tracker on top of raw per-frame detection, which fixed the box-flicker effect found earlier. Instead of every frame being detected in isolation, `Tracker.update()` links detections across frames into persistent tracked boxes with their own `track_id`. The websocket payload and zone-alerting key off tracked detections (not raw ones).
 
 ### Tracking algorithm
 
@@ -97,6 +97,18 @@ Limitations:
 - If a track dies (occlusion past `max_age`, or leaves frame) while still inside the zone, no exit event ever fires. `entries - exits` as a live occupancy count will overcount in that case.
 
 Verified with two websocket-pipeline integration tests, using a detector that steps a box 40px/frame (under `centroid_max_dist`'s 56px threshold for a 640x480 frame, so the same track ID survives the crossing) from outside the zone to inside, and the reverse. Confirms the event fires exactly once and `occupancy` reflects it correctly.
+
+### Multi-class detection and the package left/taken compound event
+
+Refactored OnnxDetector to detect more classes than person only. HogPersonDetector remains person-detection only. `classes: set[str] | None = None` lets a caller request any subset of the 80 COCO class names, defaulting to person-only so every existing caller (`check_accuracy.py`, `diagnose_tracking.py`) behaves exactly as before.
+
+`_nms` was refactored to include label awareness by grouping detections by label before applying the per-call NMS suppression algorithm.
+
+COCO has no literal `box`/`package`/`parcel` class. `PACKAGE_CLASSES = {"backpack", "suitcase", "handbag"}` are the closest available by size/shape, so this is more of a demonstration of the multi-class detection architecture and left-then-take state machine. Would need fine-tuned training data on real delivery packages to fix this.
+
+`PackageMonitor` (`app/alerts.py`) tracks package-class tracks through `left -> taken`: "left" fires once a package has sat stationary in the zone for `PACKAGE_LEFT_SECONDS` and "taken" fires when a previously-flagged package's track is no longer alive. Only "taken" escalates to a real alert (`alert_type="package_taken"`), while "left" stays informational.
+
+Does not gate "left" on `has_moved()` to avoid false negatives from disregarding obscured/existing packages, but allows more oppurtunity for false positives misclassified as the package classes.
 
 ### Entryway demo
 
@@ -166,7 +178,7 @@ See `results/benchmark_real_model.csv` for the full real run.
 
 ## Architecture / design decisions
 
-- **Two detectors behind one interface** (`app/detector.py`): `HogPersonDetector` (OpenCV's built-in HOG+SVM, zero setup) and `OnnxPersonDetector` (real YOLOv8 via onnxruntime), both returning the same `Detection` dataclass and `(detections, elapsed_time)` tuple, swappable via `DETECTOR_BACKEND` env var. A shared `draw_detections()` helper lives next to `Detection` so the box/label drawing style is defined once, not copy-pasted across `scripts/test_video.py`, `/demo/detect`, and anywhere else that needs it.
+- **Two detectors behind one interface** (`app/detector.py`): `HogPersonDetector` (OpenCV's built-in HOG+SVM, zero setup) and `OnnxDetector` (real YOLOv8 via onnxruntime), both returning the same `Detection` dataclass and `(detections, elapsed_time)` tuple, swappable via `DETECTOR_BACKEND` env var. A shared `draw_detections()` helper lives next to `Detection` so the box/label drawing style is defined once, not copy-pasted across `scripts/test_video.py`, `/demo/detect`, and anywhere else that needs it.
 - **Drawing code lives in its own module** (`app/drawing.py`), not inside `detector.py`/`tracker.py`, because `draw_detections()` and `draw_tracks()` are the only things in the codebase that need `cv2`/`numpy` purely for visualization, so tracking's matching logic stays  testable in isolation.
 - **Tracking is a lightweight IoU/centroid greedy matcher** not a heavier learned tracker.
 - **Letterbox resize, not stretch-resize**, before feeding frames to the ONNX model the pipeline scales them to fit while preserving aspect ratio, pads the rest with grey, then undoes the scale+pad math on the output boxes. A straight resize would distort people's proportions and hurt accuracy. This is also the root cause of the dense-crowd failure mode above where the whole frame, including every tiny distant person, gets scaled down together.
@@ -178,11 +190,11 @@ See `results/benchmark_real_model.csv` for the full real run.
 
 ## Tests
 
-60 tests, `pip install pytest fakeredis && pytest tests/ -v`:
-- `test_detector.py`: NMS (suppression, survival, empty input, partial overlap below threshold)
+72 tests, `pip install pytest fakeredis && pytest tests/ -v`:
+- `test_detector.py`: NMS (suppression, survival, empty input, partial overlap below threshold, overlapping classes/labels, OnnxDetector configurable classes)
 - `test_tracker.py`: track confirmation gating (`min_hits`), surviving a one-frame gap under the same ID, expiry after `max_age` consecutive misses, two well-separated tracks not swapping IDs, a track's label/confidence reflecting the real matched detection rather than a placeholder, `stationary_frames`/`has_moved`, and `alive_track_ids()` across unconfirmed/gapped/expired tracks
-- `test_alerts.py`: `Zone.overlaps_box`'s four separation directions plus edge-touching, `AlertManager`'s cooldown/dedup logic via `fakeredis` (including per-`alert_type` cooldown separation), and `EntryExitCounter`'s entry/exit/no-event/pruning/multi-track cases
-- `test_main.py`: FastAPI route coverage (`/health`, `/alerts/recent`) via `TestClient`, plus full end-to-end integration tests through the websocket route: a detection crossing the zone firing an alert and landing in `/alerts/recent` (`test_alert_full_pipeline`), loitering firing/not-firing for a moving-then-still vs always-static track, and entry/exit events + occupancy counts firing correctly for a track walking into and out of the zone
+- `test_alerts.py`: `Zone.overlaps_box`'s four separation directions plus edge-touching, `AlertManager`'s cooldown/dedup logic via `fakeredis` (including per-`alert_type` cooldown separation), and `EntryExitCounter`'s entry/exit/no-event/pruning/multi-track cases and `PackageMonitor's` left/taken state machine
+- `test_main.py`: FastAPI route coverage (`/health`, `/alerts/recent`) via `TestClient`, plus full end-to-end integration tests through the websocket route: a detection crossing the zone firing an alert and landing in `/alerts/recent` (`test_alert_full_pipeline`), loitering firing/not-firing for a moving-then-still vs always-static track, and entry/exit events + occupancy counts firing correctly for a track walking into and out of the zone, a package being detected and taken properly
 - `test_check_accuracy.py`: `bootstrap_ci()` degenerate cases collapsing to exactly zero-width CIs (single image or all images identical), the point estimate being the real aggregate independent of seed/resample count, agreement with an independent non-vectorized reference implementation, a wider sample producing a tighter interval, and the zero-denominator resample edge case resolving to 0.0 instead of crashing
 - `test_benchmark.py`: `RandomCalibrationDataReader`'s contract, it must yield exactly `num_samples` samples then `None`, correct shape/dtype/key per sample
 
@@ -219,10 +231,10 @@ This is a benchmarking harness and an alerting service, not an on-device deploym
 ## TODO / known gaps
 
 - HOG is not very accurate, it's there because it needs no download. I would use the ONNX path for anything real
-- multi-class detection for a package-left-then-taken compound event. `Track.label` was already added specifically to support this later, not yet built
+- some tests in `test_main.py` rely on an earlier test in the file warming up the `@lru_cache`'d redis-client dependency, so running a single test from that file in isolation (rather than the full file/suite) can fail
 - no auth on the websocket or `/demo/detect`
 - alert history is just whatever's in Redis's bounded list, nothing persisted long term
 - single camera only right now
 - zone is still a computed default (`default_zone_for_resolution`), not yet user-configurable per camera -- correct across resolutions now, but a real deployment would want this drawn by a user in a setup UI, not any default at all
 - dense-crowd scenes are still alimitation for a motion-only tracker, to fix would add re-identification embedding.
-- tiled/sliding-window inference for dense-crowd *detection* (as opposed to tracking) also not yet tried
+- tiled/sliding-window inference for dense-crowd detection (as opposed to tracking) also not yet tried
