@@ -310,3 +310,136 @@ def test_package_left_then_taken():
         main_module.app.dependency_overrides.clear()
 
 
+def make_test_jpeg():
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    ok, buf = cv2.imencode(".jpg", frame)
+    return buf.tobytes()
+
+
+def test_demo_detect_returns_json_detections(client):
+    response = client.post(
+        "/demo/detect",
+        files={"file": ("test.jpg", make_test_jpeg(), "image/jpeg")},
+        params={"format": "json"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "detections" in body
+    assert "timing" in body
+
+
+def test_demo_detect_no_auth_required_when_api_key_unset(client, monkeypatch):
+    monkeypatch.delenv("API_KEY", raising=False)
+    response = client.post(
+        "/demo/detect",
+        files={"file": ("test.jpg", make_test_jpeg(), "image/jpeg")},
+        params={"format": "json"},
+    )
+    assert response.status_code == 200
+
+
+def test_demo_detect_rejects_missing_api_key_when_set(client, monkeypatch):
+    monkeypatch.setenv("API_KEY", "correct=secret")
+    response = client.post(
+        "/demo/detect",
+        files={"file": ("test.jpg", make_test_jpeg(), "image/jpeg")},
+        params={"format": "json"},
+    )
+    assert response.status_code == 401
+
+
+def test_demo_detect_rejects_wrong_api_key(client, monkeypatch):
+    monkeypatch.setenv("API_KEY", "correct-secret")
+    response = client.post(
+        "/demo/detect",
+        files={"file": ("test.jpg", make_test_jpeg(), "image/jpeg")},
+        params={"format": "json"},
+        headers={"x-api-key": "wrong-secret"},
+    )
+    assert response.status_code == 401
+
+
+def test_demo_detect_accepts_correct_api_key(client, monkeypatch):
+    monkeypatch.setenv("API_KEY", "correct-secret")
+    response = client.post(
+        "/demo/detect",
+        files={"file": ("test.jpg", make_test_jpeg(), "image/jpeg")},
+        params={"format": "json"},
+        headers={"x-api-key": "correct-secret"},
+    )
+    assert response.status_code == 200
+
+
+class TrackingFrameSourceFactory:
+    """
+    Wrap FakeFrameSource construction so test can verify it was 
+    actually called, proving that an unauthorized websocket connection
+    never triggers get_frame_source() to open a video device.
+    """
+    def __init__(self, frames):
+        self.frames = frames
+        self.was_called = False
+
+    def __call__(self):
+        self.was_called = True
+        return FakeFrameSource(self.frames)
+
+
+def test_websocket_rejects_connection_no_api_key(monkeypatch):
+    monkeypatch.setenv("API_KEY", "correct-secret")
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    shared_alert_manager = AlertManager(fake_redis, cooldown_seconds=30)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
+    main_module.app.dependency_overrides[deps.get_detector] = lambda: FakeDetector()
+    main_module.app.dependency_overrides[deps.get_frame_source] = lambda: FakeFrameSource([frame])
+
+    try:
+        with TestClient(main_module.app) as test_client:
+            with pytest.raises(Exception):
+                with test_client.websocket_connect("/ws/detections") as ws:
+                    ws.receive_json()
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+
+def test_websocket_unauthorized_connection_never_opens_video_source(monkeypatch):
+    monkeypatch.setenv("API_KEY", "correct-secret")
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    shared_alert_manager = AlertManager(fake_redis, cooldown_seconds=30)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    tracking_factory = TrackingFrameSourceFactory([frame])
+
+    main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
+    main_module.app.dependency_overrides[deps.get_detector] = lambda: FakeDetector()
+    main_module.app.dependency_overrides[deps.get_frame_source] = tracking_factory
+
+    try:
+        with TestClient(main_module.app) as test_client:
+            with pytest.raises(Exception):
+                with test_client.websocket_connect("/ws/detections") as ws:
+                    ws.receive_json()
+        assert tracking_factory.was_called is False
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+
+def test_websocket_accepts_connection_with_correct_api_key(monkeypatch):
+    monkeypatch.setenv("API_KEY", "correct-secret")
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    shared_alert_manager = AlertManager(fake_redis, cooldown_seconds=30)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
+    main_module.app.dependency_overrides[deps.get_detector] = lambda: FakeDetector()
+    main_module.app.dependency_overrides[deps.get_frame_source] = lambda: FakeFrameSource([frame])
+
+    try:
+        with TestClient(main_module.app) as test_client:
+            with test_client.websocket_connect("/ws/detections?api_key=correct-secret") as ws:
+                data = ws.receive_json()
+                assert "detections" in data
+    finally:
+        main_module.app.dependency_overrides.clear()
+        
