@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 
 from app.alerts import AlertManager, EntryExitCounter, PackageMonitor, default_zone_for_resolution, LOITERING_SECONDS
-from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source
+from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source, verify_api_key, verify_api_key_ws
 from app.detector import HogPersonDetector, OnnxDetector
 from app.drawing import draw_detections
 from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution
@@ -71,6 +71,7 @@ async def demo_detect(
     file: UploadFile = File(...),
     format: str = "image", # or 'json'
     detector: HogPersonDetector | OnnxDetector = Depends(get_detector),
+    _: None = Depends(verify_api_key),
 ):
     """Post an image to this endpoint, get back detections as JSON or an annotated image."""
     t0 = time.perf_counter()
@@ -116,11 +117,13 @@ async def demo_detect(
 async def websocket_detections(
     websocket: WebSocket, 
     include_frame: bool = False,
+    _auth: None = Depends(verify_api_key_ws),
     alert_manager: AlertManager = Depends(get_alert_manager), 
     detector: HogPersonDetector | OnnxDetector = Depends(get_detector), 
     cap: cv2.VideoCapture = Depends(get_frame_source)
     ):
-    """Streams detections+alerts. Needs VIDEO_SOURCE set to a webcam index or RTSP url."""
+    """Streams detections+alerts. Needs VIDEO_SOURCE set to a webcam index or RTSP url.
+    If API_KEY is set in the environment, connect with /ws/detections?api_key=..."""
     await websocket.accept()
 
     try:

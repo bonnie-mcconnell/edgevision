@@ -179,6 +179,7 @@ See `results/benchmark_real_model.csv` for the full real run.
 ## Architecture / design decisions
 
 - **Two detectors behind one interface** (`app/detector.py`): `HogPersonDetector` (OpenCV's built-in HOG+SVM, zero setup) and `OnnxDetector` (real YOLOv8 via onnxruntime), both returning the same `Detection` dataclass and `(detections, elapsed_time)` tuple, swappable via `DETECTOR_BACKEND` env var. A shared `draw_detections()` helper lives next to `Detection` so the box/label drawing style is defined once, not copy-pasted across `scripts/test_video.py`, `/demo/detect`, and anywhere else that needs it.
+- **API key auth on `/demo/detect` and `/ws/detections`**, off by default. Set API_KEY for deployment, local dev needs nothing. HTTP uses an X-API-Key header, the websocket uses a ?api_key=... query param instead, since browser WebSocket clients have no way to set custom headers at all. Both compare with secrets.compare_digest, not ==, to avoid a timing side-channel on the secret comparison. Websocket's auth check is the first route dependency so it short circuits before `get_frame_source()` can open a real video source for an unauthorized connection.
 - **Drawing code lives in its own module** (`app/drawing.py`), not inside `detector.py`/`tracker.py`, because `draw_detections()` and `draw_tracks()` are the only things in the codebase that need `cv2`/`numpy` purely for visualization, so tracking's matching logic stays  testable in isolation.
 - **Tracking is a lightweight IoU/centroid greedy matcher** not a heavier learned tracker.
 - **Letterbox resize, not stretch-resize**, before feeding frames to the ONNX model the pipeline scales them to fit while preserving aspect ratio, pads the rest with grey, then undoes the scale+pad math on the output boxes. A straight resize would distort people's proportions and hurt accuracy. This is also the root cause of the dense-crowd failure mode above where the whole frame, including every tiny distant person, gets scaled down together.
@@ -190,11 +191,11 @@ See `results/benchmark_real_model.csv` for the full real run.
 
 ## Tests
 
-72 tests, `pip install pytest fakeredis && pytest tests/ -v`:
+80 tests, `pip install pytest fakeredis && pytest tests/ -v`:
 - `test_detector.py`: NMS (suppression, survival, empty input, partial overlap below threshold, overlapping classes/labels, OnnxDetector configurable classes)
 - `test_tracker.py`: track confirmation gating (`min_hits`), surviving a one-frame gap under the same ID, expiry after `max_age` consecutive misses, two well-separated tracks not swapping IDs, a track's label/confidence reflecting the real matched detection rather than a placeholder, `stationary_frames`/`has_moved`, and `alive_track_ids()` across unconfirmed/gapped/expired tracks
 - `test_alerts.py`: `Zone.overlaps_box`'s four separation directions plus edge-touching, `AlertManager`'s cooldown/dedup logic via `fakeredis` (including per-`alert_type` cooldown separation), and `EntryExitCounter`'s entry/exit/no-event/pruning/multi-track cases and `PackageMonitor's` left/taken state machine
-- `test_main.py`: FastAPI route coverage (`/health`, `/alerts/recent`) via `TestClient`, plus full end-to-end integration tests through the websocket route: a detection crossing the zone firing an alert and landing in `/alerts/recent` (`test_alert_full_pipeline`), loitering firing/not-firing for a moving-then-still vs always-static track, and entry/exit events + occupancy counts firing correctly for a track walking into and out of the zone, a package being detected and taken properly
+- `test_main.py`: FastAPI route coverage (`/health`, `/alerts/recent`) via `TestClient`, API-key auth on `/demo/detect` and websocket, plus integration tests through the websocket route: a detection crossing the zone firing an alert and landing in `/alerts/recent` (`test_alert_full_pipeline`), loitering firing/not-firing for a moving-then-still vs always-static track, and entry/exit events + occupancy counts firing correctly for a track walking into and out of the zone, a package being detected and taken properly
 - `test_check_accuracy.py`: `bootstrap_ci()` degenerate cases collapsing to exactly zero-width CIs (single image or all images identical), the point estimate being the real aggregate independent of seed/resample count, agreement with an independent non-vectorized reference implementation, a wider sample producing a tighter interval, and the zero-denominator resample edge case resolving to 0.0 instead of crashing
 - `test_benchmark.py`: `RandomCalibrationDataReader`'s contract, it must yield exactly `num_samples` samples then `None`, correct shape/dtype/key per sample
 
@@ -212,6 +213,8 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 then go to `http://localhost:8000/live` in a browser with `VIDEO_SOURCE=0` set, or connect a websocket client directly to `ws://localhost:8000/ws/detections`.
+
+Auth is off by default, but for deployment set API_KEY and include it in every request: `curl -H "X-API-Key: <key>" -F file=@image.jpg http://localhost:8000/demo/detect` and `ws://localhost:8000/ws/detections?api_key=<key>` for the websocket (a query param for the API key rather than a header because browser WebSocket clients can't set custom headers).
 
 For the ONNX backend outside Docker:
 ```
@@ -232,9 +235,8 @@ This is a benchmarking harness and an alerting service, not an on-device deploym
 
 - HOG is not very accurate, it's there because it needs no download. I would use the ONNX path for anything real
 - some tests in `test_main.py` rely on an earlier test in the file warming up the `@lru_cache`'d redis-client dependency, so running a single test from that file in isolation (rather than the full file/suite) can fail
-- no auth on the websocket or `/demo/detect`
 - alert history is just whatever's in Redis's bounded list, nothing persisted long term
 - single camera only right now
-- zone is still a computed default (`default_zone_for_resolution`), not yet user-configurable per camera -- correct across resolutions now, but a real deployment would want this drawn by a user in a setup UI, not any default at all
-- dense-crowd scenes are still alimitation for a motion-only tracker, to fix would add re-identification embedding.
+- zone is still a computed default (`default_zone_for_resolution`), not yet user-configurable per camera. It's correct across resolutions but a real deployment would want this drawn by a user in a setup UI, not any default at all
+- dense-crowd scenes are still a limitation for a motion-only tracker, to fix would add re-identification embedding.
 - tiled/sliding-window inference for dense-crowd detection (as opposed to tracking) also not yet tried
