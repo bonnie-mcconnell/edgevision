@@ -89,7 +89,7 @@ def match_detections(detections: list[Detection], ground_truth_boxes: list[tuple
     return tp, fp, fn
 
 
-def evaluate(conf_threshold: float, ground_truths: dict, images_dir: str, verbose: bool = False) -> tuple[float, float, int, int, int, list[tuple[int, int, int]]]:
+def evaluate(conf_threshold: float, ground_truths: dict, images_dir: str, corruption_fn=None, verbose: bool = False) -> tuple[float, float, int, int, int, list[tuple[int, int, int]]]:
     detector = OnnxDetector("models/yolov8n.onnx", 640, conf_threshold)
     total_tp, total_fp, total_fn = 0, 0, 0
     per_image_results: list[tuple[int, int, int]] = []  # (tp, fp, fn), one entry per image, the bootstrap resampling unit
@@ -100,6 +100,9 @@ def evaluate(conf_threshold: float, ground_truths: dict, images_dir: str, verbos
         if frame is None:
             print(f"Skipping {filename}: couldn't read {src_path}")
             continue
+
+        if corruption_fn is not None:
+            frame = corruption_fn(frame)
 
         detections, elapsed = detector.detect(frame)
 

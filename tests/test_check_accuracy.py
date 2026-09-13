@@ -1,7 +1,9 @@
 import random
+import cv2
+import numpy as np
 import pytest
 
-from scripts.check_accuracy import bootstrap_ci
+from scripts.check_accuracy import bootstrap_ci, evaluate
 
 
 def naive_bootstrap_ci(per_image_results, metric, num_resamples, confidence=0.95, seed=7):
@@ -116,3 +118,44 @@ def test_same_seed_is_reproducible():
 def test_invalid_metric_raises():
     with pytest.raises(AssertionError):
         bootstrap_ci([(1, 0, 0)], metric="f1")
+
+
+class FakeDetectorForEvaluate:
+    """Records every frame it's asked to detect on, so
+    tests can verify corruption_fn is being applied or not."""
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def detect(self, frame):
+        self.last_seen = frame
+        return [], 0.0
+
+
+def test_evaluate_applies_corruption_fn(tmp_path, monkeypatch):
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    frame = np.full((50, 50, 3), 200, dtype=np.uint8)
+    cv2.imwrite(str(img_dir / "a.jpg"), frame)
+
+    fake_detector = FakeDetectorForEvaluate()
+    monkeypatch.setattr("scripts.check_accuracy.OnnxDetector", lambda *a, **k: fake_detector)
+
+    def darken(f):
+        return np.clip(f.astype(np.float32) * 0.1, 0, 255).astype(np.uint8)
+
+    evaluate(0.4, {"a.jpg": []}, str(img_dir), corruption_fn=darken)
+
+    assert fake_detector.last_seen.mean() < frame.mean()
+
+
+def test_evaluate_without_corruption_fn(tmp_path, monkeypatch):
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    frame = np.full((50, 50, 3), 200, dtype=np.uint8)
+    cv2.imwrite(str(img_dir / "a.jpg"), frame)
+
+    fake_detector = FakeDetectorForEvaluate()
+    monkeypatch.setattr("scripts.check_accuracy.OnnxDetector", lambda *a, **k: fake_detector)
+
+    evaluate(0.4, {"a.jpg": []}, str(img_dir)) # corruption_fn defaults to None
+    assert abs(int(fake_detector.last_seen.mean()) - int(frame.mean())) < 5
