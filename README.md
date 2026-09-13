@@ -51,6 +51,28 @@ Full annotated video output: `results/video/street_annotated.mp4`, generated via
 
 The `/live` browser view and the `/ws/detections` websocket both report a per-frame timing breakdown (`read_ms`, `detect_ms`, and `encode_ms` when frames are included). The pipeline is fully serial: read a frame, run inference, JPEG-encode it, send it, wait for the next request-response cycle to draw it, with no frame buffering or threading decoupling capture from inference. Perceived lag in `/live` shows real per-frame inference time (~150-250ms with the ONNX backend on CPU). A production system would decouple capture and inference with a frame queue to smooth this out, but in this project it's kept simple.
 
+## Robustness
+
+Investigates this detector's accuracy for frames that aren't clean, uncompressed and well-lit using `scripts/check_robustness.py`, which reuses the 200-image labeled set and bootstrap CI from the earlier accuracy investigations, applying corruptions to the frames before detection: brightness shift (dusk/dawn/glare), Gaussian blur (motion blur/defocus/condensation) and JPEG re-compression. 
+
+| corruption | severity | precision [95% CI] | recall [95% CI] |
+|---|---|---|---|
+| clean | none | 0.888 [0.846, 0.928] | 0.531 [0.486, 0.579] |
+| dark | mild | 0.884 [0.841, 0.926] | 0.521 [0.476, 0.569] |
+| dark | severe | 0.893 [0.850, 0.933] | 0.503 [0.456, 0.553] |
+| bright | mild | 0.895 [0.857, 0.930] | 0.521 [0.474, 0.572] |
+| bright | severe | 0.898 [0.858, 0.935] | 0.491 [0.444, 0.541] |
+| blur | mild | 0.912 [0.882, 0.942] | 0.505 [0.457, 0.557] |
+| blur | severe | 0.904 [0.868, 0.936] | 0.394 [0.344, 0.446] |
+| jpeg | mild | 0.920 [0.890, 0.949] | 0.443 [0.393, 0.494] |
+| jpeg | severe | 0.769 [0.627, 0.909] | 0.045 [0.025, 0.068] |
+
+At 200 iamges, only two corruptions produce a recall drop whose confidence interval no longer overlaps the clean baseline's: severe blur and severe JPEG. All other combinations (brightness/darkness at both severities, mild blur and mild JPEG compression) show downward trend but aren't confidently distinguishable from noise for this sample size. This indicates that this detector is more robust to lighting shifts than it is to blur or compression.
+
+Severe JPEG compression reduces recall from 53% to 4.5%, however this is worst-case quality setting (`quality=5`). The more practically relevant number is `jpeg-mild` (`quality=30`), where recall drops from 53% to 44%, showing degradation under more realistic compression. 
+
+Precision doesn't degrade with most corruptions, instead it stays flat or improves slightly. This could be due to recall dropping with corruption, making detections that survive be the clearest and most confident detections, filtering out the lower confidence false positives, mechanically inflating precision as a side effect of recall reducing, rather than the model becoming more accurate. `jpeg-severe` reduces both precision and recall, with a confidence interval almost 3x the width of all other combinations, suggesting that the positives surviving the detection are noisy and inaccurate detections, and the model doesn't perform well with this severe compression.
+
 ## Tracking
 
 Added a lightweight IoU/centroid tracker on top of raw per-frame detection, which fixed the box-flicker effect found earlier. Instead of every frame being detected in isolation, `Tracker.update()` links detections across frames into persistent tracked boxes with their own `track_id`. The websocket payload and zone-alerting key off tracked detections (not raw ones).
@@ -191,12 +213,13 @@ See `results/benchmark_real_model.csv` for the full real run.
 
 ## Tests
 
-80 tests, `pip install pytest fakeredis && pytest tests/ -v`:
+88 tests, `pip install pytest fakeredis && pytest tests/ -v`:
 - `test_detector.py`: NMS (suppression, survival, empty input, partial overlap below threshold, overlapping classes/labels, OnnxDetector configurable classes)
 - `test_tracker.py`: track confirmation gating (`min_hits`), surviving a one-frame gap under the same ID, expiry after `max_age` consecutive misses, two well-separated tracks not swapping IDs, a track's label/confidence reflecting the real matched detection rather than a placeholder, `stationary_frames`/`has_moved`, and `alive_track_ids()` across unconfirmed/gapped/expired tracks
 - `test_alerts.py`: `Zone.overlaps_box`'s four separation directions plus edge-touching, `AlertManager`'s cooldown/dedup logic via `fakeredis` (including per-`alert_type` cooldown separation), and `EntryExitCounter`'s entry/exit/no-event/pruning/multi-track cases and `PackageMonitor's` left/taken state machine
 - `test_main.py`: FastAPI route coverage (`/health`, `/alerts/recent`) via `TestClient`, API-key auth on `/demo/detect` and websocket, plus integration tests through the websocket route: a detection crossing the zone firing an alert and landing in `/alerts/recent` (`test_alert_full_pipeline`), loitering firing/not-firing for a moving-then-still vs always-static track, and entry/exit events + occupancy counts firing correctly for a track walking into and out of the zone, a package being detected and taken properly
-- `test_check_accuracy.py`: `bootstrap_ci()` degenerate cases collapsing to exactly zero-width CIs (single image or all images identical), the point estimate being the real aggregate independent of seed/resample count, agreement with an independent non-vectorized reference implementation, a wider sample producing a tighter interval, and the zero-denominator resample edge case resolving to 0.0 instead of crashing
+- `test_check_accuracy.py`: `bootstrap_ci()` degenerate cases collapsing to exactly zero-width CIs (single image or all images identical), the point estimate being the real aggregate independent of seed/resample count, agreement with an independent non-vectorized reference implementation, a wider sample producing a tighter interval, and the zero-denominator resample edge case resolving to 0.0 instead of crashing, that `corruption_fn` hook alters the frame before detection
+- `test_check_robustness`: each corruption function tested using pixel values (brightness, blur softens sharp edge, JPEG produces lossy artifacts)
 - `test_benchmark.py`: `RandomCalibrationDataReader`'s contract, it must yield exactly `num_samples` samples then `None`, correct shape/dtype/key per sample
 
 ## Running it
