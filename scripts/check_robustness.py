@@ -36,7 +36,12 @@ def apply_jpeg_compression(frame: np.ndarray, quality: int) -> np.ndarray:
     network camera sends over wire. quality is 1-100. lower = more visible artifacts.
     """
     ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if not ok:
+        raise RuntimeError(f"cv2.imencode failed for quality={quality}")
+    decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if decoded is None:
+        raise RuntimeError(f"cv2.imdecode returned None for quality={quality}")
+    return decoded
 
 
 # (corruption name, severity label, function)
