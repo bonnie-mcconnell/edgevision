@@ -2,6 +2,9 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
 from app.detector import Detection
 
 
@@ -38,7 +41,8 @@ class Tracker:
                  centroid_max_dist: float = 75.0,
                  min_hits: int = 3,
                  max_age: int = 8,
-                 stationary_threshold: float = 20.0):
+                 stationary_threshold: float = 20.0,
+                 match_fn: Callable | None = None):
         self.tracks: list[Track] = []
         self._next_id = 0
         self.iou_threshold = iou_threshold
@@ -47,13 +51,14 @@ class Tracker:
         self.max_age = max_age
         self.stationary_threshold = stationary_threshold
         self._frame_count = 0
+        self.match_fn = match_fn if match_fn is not None else _hungarian_match
 
     def update(self, detections: list[Detection]) -> list[Track]:
         """Call once per frame. Returns currently confirmed tracks."""
         self._frame_count += 1
 
         iou_matrix = _build_score_matrix(self.tracks, detections, _iou)
-        matched, unmatched_tracks, unmatched_det = _greedy_match(
+        matched, unmatched_tracks, unmatched_det = self.match_fn(
             iou_matrix, self.iou_threshold, higher_better=True, num_cols=len(detections)
         )
 
@@ -61,7 +66,7 @@ class Tracker:
         leftover_dets = [detections[j] for j in unmatched_det]
 
         centroid_matrix = _build_score_matrix(leftover_tracks, leftover_dets, _centroid_dist)
-        matched_r2, still_unmatched_r2_rows, still_unmatched_r2_cols = _greedy_match(
+        matched_r2, still_unmatched_r2_rows, still_unmatched_r2_cols = self.match_fn(
             centroid_matrix, self.centroid_max_dist, higher_better=False, num_cols=len(leftover_dets)
         )
 
@@ -132,9 +137,6 @@ class Tracker:
         return track.stationary_since_frame != track.first_seen_frame
 
 
-    
-
-
 def _iou(boxA: tuple[float, float, float, float], boxB: tuple[float, float, float, float]) -> float:
     """Calculate IoU between a (track, detection) pair."""
     x1 = max(boxA[0], boxB[0])
@@ -178,14 +180,58 @@ def _build_score_matrix(
     return matrix
 
 
+def _hungarian_match(score_matrix: list[list[float]], threshold: float, higher_better: bool, num_cols: int) -> tuple[list[tuple[int, int]], list[int], list[int]]:
+    """
+    Optimal assignment using Hungarian algorithm (scipy.optimize.linear_sum_assignment)
+    instead of greedily matching best-scoring pair at a time. Drop in replacement
+    for _greedy_match with same interface, so callers don't change.
+
+    linear_sum_assignment minimises a cost matrix. For higher_better=True (IoU),
+    the matrix is negated first (minimise -score is equivalent to maximise score).
+    For higher_better=False (centroid distance), matrix is unchanged because it's
+    already a cost. Handles rectangular matrices (unequal tracks/detections counts)
+    automatically as scipy returns min(num_rows, num_cols) pairs, leaving the side
+    with more entries partially unassigned.
+
+    Threshold check runs after optimal assignment to reject low confidence matches.
+    """
+    num_rows = len(score_matrix)
+    if num_rows == 0 or num_cols == 0:
+        return [], list(range(num_rows)), list(range(num_cols))
+
+    matrix = np.array(score_matrix)
+    cost_matrix = -matrix if higher_better else matrix
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+    matched: list[tuple[int, int]] = []
+    used_rows, used_cols = set(), set()
+    for r, c in zip(row_ind, col_ind):
+        r, c = int(r), int(c)
+        score = score_matrix[r][c]
+        passes = score >= threshold if higher_better else score <= threshold
+        if passes:
+            matched.append((r, c))
+            used_rows.add(r)
+            used_cols.add(c)
+
+    unmatched_rows = [r for r in range(num_rows) if r not in used_rows]
+    unmatched_cols = [c for c in range(num_cols) if c not in used_cols]
+
+    return matched, unmatched_rows, unmatched_cols
+
+
 def _greedy_match(score_matrix: list[list[float]], threshold: float, higher_better: bool, num_cols: int) -> tuple[list[tuple[int, int]], list[int], list[int]]:
     """
     Greedy match the highest-scoring pair at a time.
     Returns the matched pairs, unmatched track (row) indexes, unmatched detection (col) indexes.
 
+    No longer called in Tracker.update(), replaced by _hungarian_match, which
+    finds the globally optimal assignment, see test_hungarian_beats_greedy.
+    Kept for comparison of performance.
+
     num_cols must be passed explicitly (not inferred from score_matrix's shape): when there
     are zero tracks, score_matrix has zero rows, and an empty nested list can't tell you how
-    many columns it "would have had", so the caller must pass that info.
+    many columns it would have had, so the caller must pass that info.
     """
     triples = []
     num_rows = len(score_matrix)

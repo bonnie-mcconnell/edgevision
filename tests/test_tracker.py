@@ -1,5 +1,5 @@
 from app.detector import Detection
-from app.tracker import Tracker
+from app.tracker import Tracker, _greedy_match, _hungarian_match
 
 
 def make_det(x1, y1, x2, y2, conf=0.9):
@@ -197,3 +197,111 @@ def test_alive_track_ids_excludes_track_after_it_dies():
 
     assert track_id not in tracker.alive_track_ids()
     assert tracker.alive_track_ids() == set()
+
+
+def test_hungarian_beats_greedy():
+    """
+    Greedy matching takes the single best pair at a time, e.g
+    takes (A-Det1, 0.60), then remaining (B-Det2, 0.05) which
+    is left unmatched. Hungarian finds optimal global assignment
+    (A-Det2 + B-Det1 = 1.05) for all tracks.
+    """
+    iou_matrix = [
+        [0.60, 0.50],
+        [0.55, 0.05],
+    ]
+
+    greedy_matched, _, _ = _greedy_match(iou_matrix, threshold=0.3, higher_better=True, num_cols=2)
+    hungarian_matched, hung_unmatched_rows, hung_unmatched_cols = _hungarian_match(
+        iou_matrix, threshold=0.3, higher_better=True, num_cols=2
+    )
+
+    assert greedy_matched == [0, 0] # leaves track 1 unmatched
+    assert set(hungarian_matched) == {(0, 1), (1, 0)} # matches both
+    assert hung_unmatched_rows == []
+    assert hung_unmatched_cols == []
+
+    greedy_total = sum(iou_matrix[r][c] for r, c in greedy_matched)
+    hungarian_total = sum(iou_matrix[r][c] for r, c in hungarian_matched)
+    assert hungarian_total > greedy_total
+
+
+def test_hungarian_empty_matrix():
+    assert _hungarian_match([], threshold=0.3, higher_better=True, num_cols=0) == ([], [], [])
+
+
+def test_hungarian_zero_tracks():
+    matched, unmatched_rows, unmatched_cols = _hungarian_match(
+        [[], []], threshold=0.3, higher_better=True, num_cols=0
+    )
+    assert matched == []
+    assert unmatched_rows == [0, 1]
+    assert unmatched_cols == []
+
+
+def test_hungarian_rectangular():
+    """3 tracks & 2 detections makes a rectangular matrix, one track
+    must be unmatched. (0, 1) + (2, 0) = 1.7 is the optimal solution."""
+    matrix = [
+        [0.5, 0.9],
+        [0.2, 0.6],
+        [0.8, 0.3],
+    ]
+    matched, unmatched_rows, unmatched_cols = _hungarian_match(matrix, threshold=0.1, higher_better=True, num_cols=2)
+
+    assert set(matched) == {(0, 1), (2, 0)}
+    assert unmatched_rows == [1]
+    assert unmatched_cols == []
+
+
+def test_hungarian_threshold_rejects_optimal_pairing():
+    """
+    Hungarian finds optimal assignment, threshold checks afterwards
+    and rejects bad matches.
+    """
+    all_bad = [[0.05, 0.02], [0.01, 0.03]]
+    matched, unmatched_rows, unmatched_cols = _hungarian_match(all_bad, threshold=0.3, higher_better=True, num_cols=2)
+
+    assert matched == []
+    assert unmatched_rows == [0, 1]
+    assert unmatched_cols == [0, 1]
+
+
+def test_hungarian_lower_better():
+    """higher_better=False for centroid distance. Smaller
+    values are better matches, matrix used as cost."""
+    distance_matrix = [
+        [10.0, 80.0],
+        [70.0, 15.0],
+    ]
+
+    matched, unmatched_rows, unmatched_cols = _hungarian_match(
+        distance_matrix, threshold=20.0, higher_better=False, num_cols=2
+    )
+    assert set(matched) == {(0, 0), (1, 1)}
+    assert unmatched_rows == []
+    assert unmatched_cols == []
+
+
+def test_hungarian_greedy_agrees():
+    """
+    When only one correct pairing exists both algorithms agree.
+    """
+    matrix = [
+        [0.9, 0.05],
+        [0.05, 0.85],
+    ]
+    greedy_matched, _, _ = _greedy_match(matrix, threshold=0.3, higher_better=True, num_cols=2)
+    hungarian_matched, _, _ = _hungarian_match(matrix, threshold=0.3, higher_better=True, num_cols=2)
+
+    assert set(greedy_matched) == set(hungarian_matched) == {(0, 0), (1, 1)}
+
+
+def test_tracker_defaults_hungarian():
+    tracker = Tracker()
+    assert tracker.match_fn is _hungarian_match
+
+
+def test_tracker_custom_match_fn():
+    tracker = Tracker(match_fn=_greedy_match)
+    assert tracker.match_fn is _greedy_match
