@@ -156,7 +156,7 @@ async def websocket_detections(
                 continue
             detect_done = time.perf_counter()
 
-            tracks = tracker.update(detections)
+            tracks = tracker.update(detections, frame=frame)
             track_done = time.perf_counter()
 
             crossing_events = entry_exit_counter.update(tracks, zone, tracker.alive_track_ids())

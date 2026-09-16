@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from app.appearance import appearance_descriptor, appearance_distance
 from app.detector import Detection
 
 
@@ -34,6 +35,7 @@ class Track:
     first_seen_frame: int
     anchor_box: tuple[float, float, float, float] 
     stationary_since_frame: int
+    appearance: np.ndarray | None = None # last known appearance descriptor
 
 
 class Tracker:
@@ -42,7 +44,9 @@ class Tracker:
                  min_hits: int = 3,
                  max_age: int = 8,
                  stationary_threshold: float = 20.0,
-                 match_fn: Callable | None = None):
+                 match_fn: Callable | None = None,
+                 revival_max_age: int = 90,
+                 appearance_threshold: float = 0.5):
         self.tracks: list[Track] = []
         self._next_id = 0
         self.iou_threshold = iou_threshold
@@ -52,9 +56,23 @@ class Tracker:
         self.stationary_threshold = stationary_threshold
         self._frame_count = 0
         self.match_fn = match_fn if match_fn is not None else _hungarian_match
+        self.revival_max_age = revival_max_age
+        self.appearance_threshold = appearance_threshold
 
-    def update(self, detections: list[Detection]) -> list[Track]:
-        """Call once per frame. Returns currently confirmed tracks."""
+        # track_id: {"appearance": , "label": , "died_frame":, }
+        # for tracks exceeding max_age but within revivial max age
+        self._recently_dead: dict[int, dict] = {}
+
+    def update(self, detections: list[Detection], frame: np.ndarray | None = None) -> list[Track]:
+        """
+        Call once per frame. Returns currently confirmed tracks.
+
+        frame is optional, omit it and function behaves same as before
+        appearance re-ID existed (no revival/appearance descriptors).
+        Pass frame to enable revival: a track whose detection reappears 
+        after an occlusion gap, at a position too far for centroid matching 
+        to match can be revived if visual appearance matches.
+        """
         self._frame_count += 1
 
         iou_matrix = _build_score_matrix(self.tracks, detections, _iou)
@@ -91,15 +109,55 @@ class Tracker:
                 track.anchor_box = track.box
                 track.stationary_since_frame = self._frame_count
 
+            if frame is not None:
+                track.appearance = appearance_descriptor(frame, track.box)
+
         for track_idx in final_unmatched_tracks:
             self.tracks[track_idx].misses += 1
+
+        # tracks about to be dropped get recorded for potential revivial
+        for track in self.tracks:
+            if track.misses > self.max_age and track.appearance is not None:
+                self._recently_dead[track.track_id] = {
+                    "appearance": track.appearance,
+                    "label": track.label,
+                    "died_frame": self._frame_count,
+                }
+
+        # prune revival candidates that have exceeded revival max age
+        self._recently_dead = {
+            tid: info for tid, info in self._recently_dead.items()
+            if self._frame_count - info["died_frame"] <= self.revival_max_age
+        }
 
         new_tracks = []
         for det_idx in final_unmatched_dets:
             det = detections[det_idx]
             box = (det.x1, det.y1, det.x2, det.y2)
-            new_tracks.append(Track(self._next_id, box, det.label, det.confidence, 1, 0, 1 >= self.min_hits, self._frame_count, box, self._frame_count))
-            self._next_id += 1
+            det_appearance = appearance_descriptor(frame, box) if frame is not None else None
+
+            revived_id = None
+            if det_appearance is not None and self._recently_dead:
+                best_id, best_dist = None, self.appearance_threshold
+                for candidate_id, info in self._recently_dead.items():
+                    dist = appearance_distance(det_appearance, info["appearance"])
+                    if dist < best_dist:
+                        best_id, best_dist = candidate_id, dist
+                revived_id = best_id
+
+            if revived_id is not None:
+                track_id = revived_id
+                del self._recently_dead[revived_id]
+            else:
+                track_id = self._next_id
+                self._next_id += 1
+            
+            new_tracks.append(Track(
+                track_id, box, det.label, det.confidence, 1, 0, 
+                1 >= self.min_hits, self._frame_count, box, self._frame_count,
+                appearance=det_appearance,
+            ))
+
 
         self.tracks = [t for t in self.tracks if t.misses <= self.max_age] + new_tracks
         return [track for track in self.tracks if track.confirmed]
@@ -115,10 +173,12 @@ class Tracker:
         """
         return {track.track_id for track in self.tracks}
 
+
     def dwell_frames(self, track: Track) -> int:
         """How many frames since this track was first seen. 
         Converting to seconds is done by caller: dwell_frames(track) / fps"""
         return self._frame_count - track.first_seen_frame
+
 
     def stationary_frames(self, track: Track) -> int:
         """
@@ -135,6 +195,7 @@ class Tracker:
         from the first observed frame.
         """
         return track.stationary_since_frame != track.first_seen_frame
+
 
 
 def _iou(boxA: tuple[float, float, float, float], boxB: tuple[float, float, float, float]) -> float:

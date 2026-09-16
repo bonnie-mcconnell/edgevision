@@ -30,19 +30,18 @@ def centroid(box):
 
 
 def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
-    """
-    Runs detect -> track -> fragmentation check pipeline using 
-    given matching function. Returns summary stats for comparison.
-    """
+    """Runs the full detect -> track -> fragmentation-check pipeline once,
+    using the given matching function. Returns summary stats so a caller
+    can run this twice (once per match_fn) and compare directly."""
     cap = cv2.VideoCapture(VIDEO_SOURCE)
-    if not cap.isOpened:
+    if not cap.isOpened():
         raise SystemExit(f"Couldn't open {VIDEO_SOURCE}")
 
     detector = OnnxDetector("models/yolov8n.onnx")
     tracker = Tracker(match_fn=match_fn)
 
-    death_events = []
-    birth_events = []
+    death_events = []  # (track_id, death_frame, last_box)
+    birth_events = []  # (track_id, birth_frame, first_box)
 
     frame_idx = 0
     while True:
@@ -54,7 +53,7 @@ def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
         detections, _ = detector.detect(frame)
 
         before = {t.track_id: t.box for t in tracker.tracks}
-        tracker.update(detections)
+        tracker.update(detections, frame=frame)
         after = {t.track_id: t.box for t in tracker.tracks}
 
         for tid in (set(before) - set(after)):
@@ -63,7 +62,7 @@ def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
             birth_events.append((tid, frame_idx, after[tid]))
 
         if frame_idx % 60 == 0:
-            print(f"   frame {frame_idx}")
+            print(f"  frame {frame_idx}")
 
     cap.release()
 
@@ -73,14 +72,14 @@ def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
         dc = centroid(death_box)
         best_born_id, best_birth_frame, best_dist = None, None, None
         for born_id, birth_frame, birth_box in birth_events:
-            dist = math.dist(dc, centroid(birth_box))
-            if dist <= REASSOC_MAX_DIST and (best_dist is None or dist < best_dist):
-                best_born_id, best_birth_frame, best_dist = born_id, birth_frame, dist
+            if death_frame < birth_frame <= death_frame + REASSOC_MAX_FRAMES:
+                dist = math.dist(dc, centroid(birth_box))
+                if dist <= REASSOC_MAX_DIST and (best_dist is None or dist < best_dist):
+                    best_born_id, best_birth_frame, best_dist = born_id, birth_frame, dist
 
         flagged = best_born_id is not None
         if flagged:
             plausible += 1
-
         rows.append({
             "died_id": died_id,
             "death_frame": death_frame,
@@ -108,18 +107,20 @@ def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
     }
 
 
-def main():
-    print("Running with GREEDY matching")
+def main() -> None:
+    print("Running with greedy matching (the original tracker):")
     greedy_stats = run_fragmentation_analysis(_greedy_match, "results/fragmentation_events_greedy.csv")
 
-    print("\nRunning with HUNGARIAN matching")
+    print("\nRunning with hungarian matching (the new optimal-assignment tracker):")
     hungarian_stats = run_fragmentation_analysis(_hungarian_match, "results/fragmentation_events_hungarian.csv")
 
     print(f"\n{'':25s} {'greedy':>12s} {'hungarian':>12s}")
     for key in ("deaths", "births", "plausible_fragmentations"):
         print(f"{key:25s} {greedy_stats[key]:>12} {hungarian_stats[key]:>12}")
     print(f"{'fragmentation %':25s} {greedy_stats['fragmentation_pct']:>11.1f}% {hungarian_stats['fragmentation_pct']:>11.1f}%")
-    print(f"\nwithin {REASSOC_MAX_FRAMES} frames, {REASSOC_MAX_DIST}px of a death, a nearby birth is likely a fragmented identity, not a real exit")
+    print(f"\n(within {REASSOC_MAX_FRAMES} frames, {REASSOC_MAX_DIST}px of a death, a nearby birth is likely a fragmented identity, not a real exit)")
+    print("Lower deaths, lower fragmentation percent, fewer tracks needlessly losing their ID, is the improvement Hungarian assignment is meant to produce.")
+
 
 if __name__ == "__main__":
     main()
