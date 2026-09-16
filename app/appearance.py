@@ -24,7 +24,7 @@ def appearance_descriptor(frame: np.ndarray, box: tuple[float, float, float, flo
 
     # clip to valid frame bounds, convert to int
     x1, y1 = max(0, int(x1)), max(0, int(y1))
-    x2, y2 = max(w, int(x2)), max(h, int(y2))
+    x2, y2 = min(w, int(x2)), min(h, int(y2))
 
     if x2 <= x1 or y2 <= y1:
         return None

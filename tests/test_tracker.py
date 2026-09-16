@@ -218,7 +218,7 @@ def test_hungarian_beats_greedy():
         iou_matrix, threshold=0.3, higher_better=True, num_cols=2
     )
 
-    assert greedy_matched == [0, 0] # leaves track 1 unmatched
+    assert greedy_matched == [(0, 0)] # leaves track 1 unmatched
     assert set(hungarian_matched) == {(0, 1), (1, 0)} # matches both
     assert hung_unmatched_rows == []
     assert hung_unmatched_cols == []
