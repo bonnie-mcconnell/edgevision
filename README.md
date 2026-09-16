@@ -79,7 +79,11 @@ Added a lightweight IoU/centroid tracker on top of raw per-frame detection, whic
 
 ### Tracking algorithm
 
-Tracking uses two rounds of greedy matching per frame, first by IoU (cheap, scale-aware but degrades to zero once two boxes stop overlapping), then by centroid-distance as a fallback for the leftovers. Centroid distance handles cases where motion ebtween frames outruns IoU's overlap requirements. Uses greedy assignment because for this project optimal-assignment cases are rare and not worth a dependency for the Hungarian algorithm.
+Tracking uses two rounds of matching per frame, first by IoU (cheap, scale-aware but degrades to zero once two boxes stop overlapping), then by centroid-distance as a fallback for the leftovers. Centroid distance handles cases where motion between frames outruns IoU's overlap requirements.
+
+Each round now solves matching with optimal-assignment via `scipy.optimize.linear_sum_assignment` (`_hungarian_match` in `app/tracker.py`), not greedy nearest-match. Greedy matching (`_greedy_match`, still in the file for comparison) grabs the single best-scoring pair at a time, which is not globally optimal when two tracks compete for overlapping detections. On real crowd footage (`test_footage/street.mp4`, 663 frames) Hungarian vs greedy produced an identical aggregate fragmentation rate (148/153, 96.7%) but different underlying decisions on 4/153 events when compared by event content rather than track-ID row position. This small difference is because most of which is occlusion-driven track expiry rather than same-frame assignment conflict (`scripts/diagnose_fragmentation.py`).
+
+Each track also carries a lightweight appearance descriptor (`app/appearance.py`): a normalized HSV hue histogram of its box region, compared via Bhattacharyya distance. When a track dies (occlusion past `max_age`) its last-known appearance is kept in a short-lived pool. A new, otherwise-unmatched detection that's appearance-close to a recently-dead track's descriptor is revived under its original `track_id` instead of getting a new one, doing what IoU/centroid matching can't by matching on an occlusion gap too large or too displaced for position alone to bridge. `revival_max_age` (90 frames) and `appearance_threshold` (0.5) are both unmeasured placeholders. Wired into both `main.py`'s live websocket loop and `diagnose_fragmentation.py`.
 
 Matching includes `min_hits`/`max_age` to measure each tracks state. A new detection starts as an unconfirmed tentative track and only becomes a reported and alertable identity after `min_hits` consecutive matches, which stops single frame false positives from getting an ID. A track that stops matching is held for `max_age` consecutive frames before it's dropped, allowing tracked boxes to survive some brief occlusion without losing the id entity.
 
@@ -138,7 +142,7 @@ Does not gate "left" on `has_moved()` to avoid false negatives from disregarding
 
 ### Crowd demo
 
-`results/video/street_tracked.mp4` is kept as a stress test. It's not what this project is made for, due to the busy crowd with many people obscuring eachother. Even after tuning, tight clusters of adjacent people still produce ID swaps when one briefly occludes another (e.g track `#7` -> `#23` mid-clip). This occurs because greedy IoU/centorid matching has no appearance signal to disambiguate which of several similarly scoring nearby candidates is the same person vs another person standing close by. To fix, you would use learned re-identification embedding (DeepSORT), which would add another model and latency.
+`results/video/street_tracked.mp4` is kept as a stress test. It's not what this project is made for, due to the busy crowd with many people obscuring eachother. Even after tuning, tight clusters of adjacent people still produce ID swaps when one briefly occludes another (e.g track `#7` -> `#23` mid-clip). This recording predates the Hungarian-assignment and appearance-re-ID work above.
 
 ## Benchmark
 
@@ -261,5 +265,5 @@ This is a benchmarking harness and an alerting service, not an on-device deploym
 - alert history is just whatever's in Redis's bounded list, nothing persisted long term
 - single camera only right now
 - zone is still a computed default (`default_zone_for_resolution`), not yet user-configurable per camera. It's correct across resolutions but a real deployment would want this drawn by a user in a setup UI, not any default at all
-- dense-crowd scenes are still a limitation for a motion-only tracker, to fix would add re-identification embedding.
+- dense-crowd scenes are still a limitation. Hungarian assignment + appearance re-ID (color-histogram based) have been built, tested, and wired into the real pipeline to target this, but a learned re-ID embedding (DeepSORT-style) is next if the lightweight color-histogram approach is insufficient
 - tiled/sliding-window inference for dense-crowd detection (as opposed to tracking) also not yet tried
