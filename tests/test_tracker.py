@@ -1,3 +1,5 @@
+import numpy as np
+
 from app.detector import Detection
 from app.tracker import Tracker, _greedy_match, _hungarian_match
 
@@ -305,3 +307,95 @@ def test_tracker_defaults_hungarian():
 def test_tracker_custom_match_fn():
     tracker = Tracker(match_fn=_greedy_match)
     assert tracker.match_fn is _greedy_match
+
+
+def make_frame_with_box(color, box, size=(200, 300)):
+    frame = np.zeros((size[0], size[1], 3), dtype=np.uint8)
+    x1, y1, x2, y2 = box
+    frame[y1:y2, x1:x2] = color
+    return frame
+
+RED = (30, 30, 200)
+BLUE = (200, 30, 30)
+ORIGINAL_BOX = (20, 20, 80, 120)
+FAR_BOX = (200, 20, 260, 120) # centroid 180px from original box
+
+
+def test_revivial_reunites_dead_track():
+    # track that died due to max_age that reappears
+    # should get its original identity back if its 
+    # appearance matches
+    tracker = Tracker(min_hits=1, max_age=2, centroid_max_dist=50.0,
+                      revival_max_age=20, appearance_threshold=0.5)
+    frame = make_frame_with_box(RED, ORIGINAL_BOX)
+    original_det = Detection(label="person", confidence=0.9, x1=20, y1=20, x2=80, y2=120)
+    confirmed = tracker.update([original_det], frame=frame)
+    original_id = confirmed[0].track_id
+
+    # occlusion, track dies and appearance is saved
+    for _ in range(3):
+        tracker.update([], frame=frame)
+
+    reappear_frame = make_frame_with_box(RED, FAR_BOX)
+    reappear_det = Detection(label="person", confidence=0.9, x1=200, y1=20, x2=260, y2=120)
+    confirmed = tracker.update([reappear_det], frame=reappear_frame)
+
+    assert confirmed[0].track_id == original_id
+
+
+
+def test_no_revival_appearance_doesnt_match():
+    tracker = Tracker(min_hits=1, max_age=2, centroid_max_dist=50.0,
+                       revival_max_age=20, appearance_threshold=0.5)
+
+    frame = make_frame_with_box(RED, ORIGINAL_BOX)
+    original_det = Detection(label="person", confidence=0.9, x1=20, y1=20, x2=80, y2=120)
+    confirmed = tracker.update([original_det], frame=frame)
+    original_id = confirmed[0].track_id
+
+    for _ in range(3):
+        tracker.update([],frame=frame)
+
+    reappear_frame = make_frame_with_box(BLUE, FAR_BOX)
+    reappear_det = Detection(label="person", confidence=0.9, x1=200, y1=20, x2=260, y2=120)
+    confirmed = tracker.update([reappear_det], frame=reappear_frame)
+
+    assert confirmed[0].track_id != original_id
+
+
+def test_no_frame_param():
+    # preserve backward compatibility, passing no frame = no revival
+    tracker = Tracker(min_hits=1, max_age=2, centroid_max_dist=50.0)
+
+    original_det = Detection(label="person", confidence=0.9, x1=20, y1=20, x2=80, y2=120)
+    confirmed = tracker.update([original_det])  # no frame
+    original_id = confirmed[0].track_id
+
+    for _ in range(3):
+        tracker.update([])
+
+    far_det = Detection(label="person", confidence=0.9, x1=200, y1=20, x2=260, y2=120)
+    confirmed = tracker.update([far_det])
+
+    assert confirmed[0].track_id != original_id
+
+
+def test_revival_max_age():
+    # dead track removed after revivial_max_age, doesn't revive
+    tracker = Tracker(min_hits=1, max_age=2, centroid_max_dist=50.0,
+                       revival_max_age=3, appearance_threshold=0.5)
+ 
+    frame = make_frame_with_box(RED, ORIGINAL_BOX)
+    original_det = Detection(label="person", confidence=0.9, x1=20, y1=20, x2=80, y2=120)
+    confirmed = tracker.update([original_det], frame=frame)
+    original_id = confirmed[0].track_id
+
+    # max_age + revivial_max_age = 3+3
+    for _ in range(8):
+        tracker.update([], frame=frame)
+
+    reappear_frame = make_frame_with_box(RED, FAR_BOX)
+    reappear_det = Detection(label="person", confidence=0.9, x1=200, y1=20, x2=260, y2=120)
+    confirmed = tracker.update([reappear_det], frame=reappear_frame)
+
+    assert confirmed[0].track_id != original_id
