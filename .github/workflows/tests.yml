@@ -20,13 +20,11 @@ jobs:
             - name: Install runtime + test dependencies
               run: pip install -r requirements.txt -r requirements-dev.txt
 
-            - name: Export ONNX model
-              run: |
-                pip install ultralytics
-                mkdir -p models
-                cd models && yolo export model=yolov8n.pt format=onnx imgsz=640
+            - name: Build the demo ONNX model
+              run: python scripts/make_demo_model.py
+              # test_detector.py constructor tests need any valid ONNX file
 
             - name: Run tests
               run: |
                 pip install pytest-cov
-                pytest tests/ -v --cop=app --cov-report=term-missing
+                pytest tests/ -v --cov=app --cov-report=term-missing

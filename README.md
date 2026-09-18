@@ -229,7 +229,7 @@ See `results/benchmark_real_model.csv` for the full real run.
 
 ## Tests
 
-109 tests, `pip install pytest fakeredis && pytest tests/ -v` (3 of these in `test_detector.py` need a real exported `models/yolov8n.onnx` present):
+109 tests, `pip install pytest fakeredis && pytest tests/ -v` (some tests need `models/demo_fp32.onnx` - small hand built CNN, `python scripts/make_demo_model.py`, nothing in the test suite needs a downloaded/exported `yolov8n.onnx`):
 - `test_detector.py`: NMS (suppression, survival, empty input, partial overlap below threshold, overlapping classes/labels, OnnxDetector configurable classes)
 - `test_tracker.py`: track confirmation gating (`min_hits`), surviving a one-frame gap under the same ID, expiry after `max_age` consecutive misses, two well-separated tracks not swapping IDs, a track's label/confidence reflecting the real matched detection rather than a placeholder, `stationary_frames`/`has_moved`, `alive_track_ids()` across unconfirmed/gapped/expired tracks, and Hungarian producing a strictly better assignment than greedy on a constructed competing-tracks case
 - `test_appearance.py`: histogram distance for same-vs-different-color boxes, clipping/cropping edge cases (out-of-frame, zero-area, partially-out-of-frame), and missing-descriptor handling always losing against a real one
