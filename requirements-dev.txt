@@ -3,6 +3,7 @@
 # Test suite (tests/)
 pytest
 fakeredis
+httpx2
 
 # Dev-only demo viewer (scripts/view_stream.py) - not part of the app
 websockets
