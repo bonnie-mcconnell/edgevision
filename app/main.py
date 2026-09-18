@@ -18,7 +18,7 @@ from app.alerts import AlertManager, EntryExitCounter, PackageMonitor, default_z
 from app.dependencies import get_alert_manager, get_detector, get_redis_client, get_frame_source, verify_api_key, verify_api_key_ws
 from app.detector import HogPersonDetector, OnnxDetector
 from app.drawing import draw_detections
-from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution
+from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution, TUNED_IOU_THRESHOLD, TUNED_MAX_AGE
 
 
 @asynccontextmanager
@@ -137,6 +137,8 @@ async def websocket_detections(
         tracker = Tracker(
             centroid_max_dist=centroid_max_dist_for_resolution(frame_width, frame_height),
             stationary_threshold=stationary_move_threshold_for_resolution(frame_width, frame_height),
+            iou_threshold=TUNED_IOU_THRESHOLD,
+            max_age=TUNED_MAX_AGE,
             )
         zone = default_zone_for_resolution(frame_width, frame_height)
         entry_exit_counter = EntryExitCounter()

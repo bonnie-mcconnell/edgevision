@@ -278,7 +278,7 @@ def test_package_left_then_taken():
     shared_alert_manager = AlertManager(fake_redis, cooldown_seconds=30)
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     left_frames = 151 # (151-1)/30 = 5.0s crosses PACKAGE_LEFT_SECONDS
-    num_frames = left_frames + 10 # + empty frames to exceed max_age=8
+    num_frames = left_frames + 35 # + empty frames to exceed max_age=30
 
     main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
     main_module.app.dependency_overrides[deps.get_detector] = lambda: FakePackageThenGoneDetector(left_frames)
@@ -442,4 +442,3 @@ def test_websocket_accepts_connection_with_correct_api_key(monkeypatch):
                 assert "detections" in data
     finally:
         main_module.app.dependency_overrides.clear()
-        

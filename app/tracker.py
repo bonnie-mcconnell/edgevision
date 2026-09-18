@@ -8,6 +8,10 @@ from scipy.optimize import linear_sum_assignment
 from app.appearance import appearance_descriptor, appearance_distance
 from app.detector import Detection
 
+# iou_threshold/max_age measured against test_footage/street.mp4 
+TUNED_IOU_THRESHOLD = 0.15
+TUNED_MAX_AGE = 30
+
 
 def centroid_max_dist_for_resolution(width: float, height: float, pct: float = 0.07) -> float:
     """Return a centroid distance threshold scaled to frame size instead of using
@@ -46,7 +50,8 @@ class Tracker:
                  stationary_threshold: float = 20.0,
                  match_fn: Callable | None = None,
                  revival_max_age: int = 90,
-                 appearance_threshold: float = 0.5):
+                 appearance_threshold: float = 0.5,
+                 revival_log: list[dict] | None = None):
         self.tracks: list[Track] = []
         self._next_id = 0
         self.iou_threshold = iou_threshold
@@ -58,6 +63,9 @@ class Tracker:
         self.match_fn = match_fn if match_fn is not None else _hungarian_match
         self.revival_max_age = revival_max_age
         self.appearance_threshold = appearance_threshold
+        # optional: pass a list in and every revival candidate comparison
+        # (not just the winner) gets appended to it as a dict, for diagnosis.
+        self.revival_log = revival_log
 
         # track_id: {"appearance": , "label": , "died_frame":, }
         # for tracks exceeding max_age but within revivial max age
@@ -141,6 +149,17 @@ class Tracker:
                 best_id, best_dist = None, self.appearance_threshold
                 for candidate_id, info in self._recently_dead.items():
                     dist = appearance_distance(det_appearance, info["appearance"])
+                    if self.revival_log is not None:
+                        self.revival_log.append({
+                            "frame": self._frame_count,
+                            "det_label": det.label,
+                            "candidate_id": candidate_id,
+                            "candidate_label": info["label"],
+                            "gap_frames": self._frame_count - info["died_frame"],
+                            "distance": round(dist, 4),
+                            "threshold": self.appearance_threshold,
+                            "passed": dist < self.appearance_threshold,
+                        })
                     if dist < best_dist:
                         best_id, best_dist = candidate_id, dist
                 revived_id = best_id

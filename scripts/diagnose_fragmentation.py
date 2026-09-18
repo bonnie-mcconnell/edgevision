@@ -14,7 +14,7 @@ import csv
 import cv2
 
 from app.detector import OnnxDetector
-from app.tracker import Tracker, _greedy_match, _hungarian_match
+from app.tracker import Tracker, _greedy_match, _hungarian_match, TUNED_IOU_THRESHOLD, TUNED_MAX_AGE
 
 
 VIDEO_SOURCE = "test_footage/street.mp4"
@@ -29,7 +29,7 @@ def centroid(box):
     return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
 
 
-def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
+def run_fragmentation_analysis(match_fn, out_csv: str, revival_csv: str) -> dict:
     """Runs the full detect -> track -> fragmentation-check pipeline once,
     using the given matching function. Returns summary stats so a caller
     can run this twice (once per match_fn) and compare directly."""
@@ -38,7 +38,8 @@ def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
         raise SystemExit(f"Couldn't open {VIDEO_SOURCE}")
 
     detector = OnnxDetector("models/yolov8n.onnx")
-    tracker = Tracker(match_fn=match_fn)
+    revival_log: list[dict] = []
+    tracker = Tracker(match_fn=match_fn, revival_log=revival_log, iou_threshold=TUNED_IOU_THRESHOLD, max_age=TUNED_MAX_AGE)
 
     death_events = []  # (track_id, death_frame, last_box)
     birth_events = []  # (track_id, birth_frame, first_box)
@@ -97,6 +98,15 @@ def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
             writer.writeheader()
             writer.writerows(rows)
 
+    if revival_log:
+        with open(revival_csv, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=revival_log[0].keys())
+            writer.writeheader()
+            writer.writerows(revival_log)
+    print(f"  {len(revival_log)} revival candidate comparisons logged, "
+          f"{sum(1 for r in revival_log if r['passed'])} passed threshold "
+          f"({revival_csv})")
+
     pct = 100 * plausible / len(death_events) if death_events else 0
     return {
         "deaths": len(death_events),
@@ -109,17 +119,25 @@ def run_fragmentation_analysis(match_fn, out_csv: str) -> dict:
 
 def main() -> None:
     print("Running with greedy matching (the original tracker):")
-    greedy_stats = run_fragmentation_analysis(_greedy_match, "results/fragmentation_events_greedy.csv")
+    greedy_stats = run_fragmentation_analysis(_greedy_match, "results/fragmentation_events_greedy.csv", "results/revival_attempts_greedy.csv")
 
     print("\nRunning with hungarian matching (the new optimal-assignment tracker):")
-    hungarian_stats = run_fragmentation_analysis(_hungarian_match, "results/fragmentation_events_hungarian.csv")
+    hungarian_stats = run_fragmentation_analysis(_hungarian_match, "results/fragmentation_events_hungarian.csv", "results/revival_attempts_hungarian.csv")
 
     print(f"\n{'':25s} {'greedy':>12s} {'hungarian':>12s}")
     for key in ("deaths", "births", "plausible_fragmentations"):
         print(f"{key:25s} {greedy_stats[key]:>12} {hungarian_stats[key]:>12}")
     print(f"{'fragmentation %':25s} {greedy_stats['fragmentation_pct']:>11.1f}% {hungarian_stats['fragmentation_pct']:>11.1f}%")
     print(f"\n(within {REASSOC_MAX_FRAMES} frames, {REASSOC_MAX_DIST}px of a death, a nearby birth is likely a fragmented identity, not a real exit)")
-    print("Lower deaths, lower fragmentation percent, fewer tracks needlessly losing their ID, is the improvement Hungarian assignment is meant to produce.")
+
+    delta = hungarian_stats["plausible_fragmentations"] - greedy_stats["plausible_fragmentations"]
+    if delta < 0:
+        print(f"Hungarian reduced plausible fragmentations by {-delta} vs greedy on this clip.")
+    elif delta > 0:
+        print(f"Hungarian did NOT reduce fragmentation here - {delta} MORE plausible fragmentations than greedy on this clip.")
+    else:
+        print("No difference in plausible fragmentations between greedy and hungarian on this clip.")
+    print("Compare the two CSVs by death_frame (not died_id, track IDs are relabeled independently per run) to see which specific events actually differ.")
 
 
 if __name__ == "__main__":

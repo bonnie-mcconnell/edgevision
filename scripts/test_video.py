@@ -5,7 +5,7 @@ import cv2
 
 from app.alerts import LOITERING_SECONDS
 from app.detector import OnnxDetector
-from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution
+from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution, TUNED_IOU_THRESHOLD, TUNED_MAX_AGE
 from app.drawing import draw_detections, draw_tracks
 
 
@@ -51,6 +51,8 @@ def main() -> None:
     tracker = Tracker(
         centroid_max_dist=centroid_max_dist_for_resolution(width, height),
         stationary_threshold=stationary_move_threshold_for_resolution(width, height),
+        iou_threshold=TUNED_IOU_THRESHOLD,
+        max_age=TUNED_MAX_AGE,
     )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
