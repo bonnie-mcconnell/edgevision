@@ -27,4 +27,4 @@ jobs:
             - name: Run tests
               run: |
                 pip install pytest-cov
-                pytest tests/ -v --cov=app --cov-report=term-missing
+                pytest tests/ -v --cop=app --cov-report=term-missing
