@@ -1,0 +1,32 @@
+name: tests
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+        
+            - uses: actions/setup-python@v5
+              with:
+                python-version: "3.12"
+                cache: "pip"
+
+            - name: Install runtime + test dependencies
+              run: pip install -r requirements.txt -r requirements-dev.txt
+
+            - name: Export ONNX model
+              run: |
+                pip install ultralytics
+                mkdir -p models
+                cd models && yolo export model=yolov8n.pt format=onnx imgsz=640
+
+            - name: Run tests
+              run: |
+                pip install pytest-cov
+                pytest tests/ -v --cop=app --cov-report=term-missing

@@ -1,5 +1,9 @@
 # EdgeVision
 
+[![tests](https://github.com/bonnie-mcconnell/edgevision/actions/workflows/tests.yml/badge.svg)](https://github.com/bonnie-mcconnell/edgevision/actions/workflows/tests.yml)
+
+![tracking demo](results/examples/entryway_demo.gif)
+
 Person detection + zone alerting for a security camera use case, with a benchmark comparing FP32, INT8 (dynamic and static), and FP16 quantized inference on CPU.
 
 ## Quick start
@@ -67,7 +71,7 @@ Investigates this detector's accuracy for frames that aren't clean, uncompressed
 | jpeg | mild | 0.920 [0.890, 0.949] | 0.443 [0.393, 0.494] |
 | jpeg | severe | 0.769 [0.627, 0.909] | 0.045 [0.025, 0.068] |
 
-At 200 iamges, only two corruptions produce a recall drop whose confidence interval no longer overlaps the clean baseline's: severe blur and severe JPEG. All other combinations (brightness/darkness at both severities, mild blur and mild JPEG compression) show downward trend but aren't confidently distinguishable from noise for this sample size. This indicates that this detector is more robust to lighting shifts than it is to blur or compression.
+At 200 images, only two corruptions produce a recall drop whose confidence interval no longer overlaps the clean baseline's: severe blur and severe JPEG. All other combinations (brightness/darkness at both severities, mild blur and mild JPEG compression) show downward trend but aren't confidently distinguishable from noise for this sample size. This indicates that this detector is more robust to lighting shifts than it is to blur or compression.
 
 Severe JPEG compression reduces recall from 53% to 4.5%, however this is worst-case quality setting (`quality=5`). The more practically relevant number is `jpeg-mild` (`quality=30`), where recall drops from 53% to 44%, showing degradation under more realistic compression. 
 
@@ -81,11 +85,19 @@ Added a lightweight IoU/centroid tracker on top of raw per-frame detection, whic
 
 Tracking uses two rounds of matching per frame, first by IoU (cheap, scale-aware but degrades to zero once two boxes stop overlapping), then by centroid-distance as a fallback for the leftovers. Centroid distance handles cases where motion between frames outruns IoU's overlap requirements.
 
-Each round now solves matching with optimal-assignment via `scipy.optimize.linear_sum_assignment` (`_hungarian_match` in `app/tracker.py`), not greedy nearest-match. Greedy matching (`_greedy_match`, still in the file for comparison) grabs the single best-scoring pair at a time, which is not globally optimal when two tracks compete for overlapping detections. On real crowd footage (`test_footage/street.mp4`, 663 frames) Hungarian vs greedy produced an identical aggregate fragmentation rate (148/153, 96.7%) but different underlying decisions on 4/153 events when compared by event content rather than track-ID row position. This small difference is because most of which is occlusion-driven track expiry rather than same-frame assignment conflict (`scripts/diagnose_fragmentation.py`).
+Each round now solves matching with optimal-assignment using `scipy.optimize.linear_sum_assignment` (`_hungarian_match` in `app/tracker.py`), not greedy nearest-match. Greedy matching (`_greedy_match`, still in the file for comparison) grabs the single best-scoring pair at a time, which is not globally optimal when two tracks compete for overlapping detections. On real crowd footage (`test_footage/street.mp4`, 663 frames, `scripts/diagnose_fragmentation.py`, run under the tuned `TUNED_IOU_THRESHOLD`/`TUNED_MAX_AGE`) Hungarian vs greedy produced near-identical results: deaths 81 vs 80, `plausible_fragmentations` 44 vs 44. Diffing the two runs event-by-event, matched by `death_frame`, since track IDs are relabeled independently between runs and comparing by raw ID would be meaningless, shows 0 shared death events where the two algorithms actually disagree on the verdict. The one-death difference is an event that doesn't occur under Hungarian. This near-total overlap is expected, a hungarian only changes the outcome when two tracks are competing for overlapping detections in the same frame. Most of this clip's fragmentation is occlusion-driven detection dropout (a track's detections disappearing for longer than `max_age`), which optimal-vs-greedy assignment doesn't affect, since there's nothing to assign in those frames.
 
-Each track also carries a lightweight appearance descriptor (`app/appearance.py`): a normalized HSV hue histogram of its box region, compared via Bhattacharyya distance. When a track dies (occlusion past `max_age`) its last-known appearance is kept in a short-lived pool. A new, otherwise-unmatched detection that's appearance-close to a recently-dead track's descriptor is revived under its original `track_id` instead of getting a new one, doing what IoU/centroid matching can't by matching on an occlusion gap too large or too displaced for position alone to bridge. `revival_max_age` (90 frames) and `appearance_threshold` (0.5) are both unmeasured placeholders. Wired into both `main.py`'s live websocket loop and `diagnose_fragmentation.py`.
+Matching includes `min_hits`/`max_age` to measure each track's state. A new detection starts as an unconfirmed tentative track and only becomes a reported and alertable identity after `min_hits` consecutive matches, which stops single frame false positives from getting an ID. A track that stops matching is held for `max_age` consecutive frames before it's dropped, allowing tracked boxes to survive some brief occlusion without losing its identity.
 
-Matching includes `min_hits`/`max_age` to measure each tracks state. A new detection starts as an unconfirmed tentative track and only becomes a reported and alertable identity after `min_hits` consecutive matches, which stops single frame false positives from getting an ID. A track that stops matching is held for `max_age` consecutive frames before it's dropped, allowing tracked boxes to survive some brief occlusion without losing the id entity.
+Each track also has a lightweight appearance descriptor (`app/appearance.py`): a normalized HSV hue histogram of its box region (cropped 20% inward on each side, `CROP_MARGIN`, before histogramming), compared via Bhattacharyya distance. When a track dies (occlusion past `max_age`) its last-known appearance is kept in a short-lived pool. A new and otherwise-unmatched detection that's appearance-close to a recently-dead track's descriptor is revived under its original `track_id` instead of getting a new one, doing what IoU/centroid matching can't by bridging an occlusion gap too large or too displaced for position alone to reconnect. Wired into both `main.py`'s live websocket loop and `diagnose_fragmentation.py`.
+
+**Appearance re-ID was validated against real footage. Result is that it doesn't work well enough to trust yet.** `Tracker` takes an optional `revival_log` list. When supplied, every revival candidate comparison it makes (not just the winning one) gets appended with its distance and pass/fail. Logging all 786 real comparisons on `street.mp4` and looking at the distribution: a working descriptor should show two separated clusters (real same-person matches near distance 0, different-person comparisons near distance 1) with `appearance_threshold` (0.5) sitting in the gap between them. The shape is instead a single smooth unimodal hump centered near 0.5 (mean 0.495, median 0.484, only 16/786 comparisons under 0.2). There's no gap to place a threshold in, so no threshold position would meaningfully separate correct matches from incorrect ones on this footage.
+
+The likely cause: `appearance_descriptor` originally histogrammed the entire box, background included, which could dilute the actual clothing signal. Tested this by adding `CROP_MARGIN = 0.2`, sampling only the inner 60% of each box, and re-running validation. Result: the whole distribution shifted right as one block (mean 0.618, median 0.617) but stayed unimodal, and the near-zero cluster got proportionally smaller (0.8% of comparisons under 0.2, vs 2.0% before). This is the opposite of what removing background dilution should produce if that were the real cause. Thus, background bleed isn't the main reason this descriptor lacks discriminative power. It also net-hurt the downstream metric - revival passed less often post-crop (53% -> 27%), so more real occlusion gaps went unbridged (deaths 144->147, `plausible_fragmentations` 106->112 on the same clip), because the crop made revival more cautious without making it more correct.
+
+**Conclusion:** a single hue histogram, whole-box or cropped, isn't discriminative enough to reliably re-identify people on this crowd footage. Clothing and lighting are too visually similar across different pedestrians for a color-only signal to separate them. No amount of threshold tuning fixes this. Only a different descriptor would. To fix, consider adding re-identification embedding (DeepSORT-style). Reran under the corrected `TUNED_IOU_THRESHOLD`/`TUNED_MAX_AGE` to rule out the earlier numbers being an artifact of the untuned settings they were measured under: same unimodal shape, no separated clusters (mean distance 0.618/0.623, 27.8%/26.6% passing), so the conclusion remains the same.
+
+`iou_threshold`/`max_age` were measured and wired into the call sites, which caused deaths to drop from 147 to 81 and `plausible_fragmentations` to drop from 76% to 54% on this clip, before appearance re-ID does anything at all.
 
 ### Tuning on testing footage
 
@@ -104,13 +116,13 @@ Both `dwell_frames()` and `stationary_frames()` count frames, not wall-clock sec
 
 `stationary_frames()` functions using an anchor box. Each track keeps an `anchor_box` set the first time it's seen, and only moves the anchor (resetting the stationary clock) once its centroid has moved further than `stationary_move_threshold_for_resolution()`, default 2% of the frame diagonal, smaller than tracking's default 7% `centroid_max_dist`, since it's answering a different question: "has this thing relocated" vs "is this still probably the same object frame-to-frame."
 
-**`has_moved()` false positive fixes** A static misdetected object never triggers an anchor reset, so by `stationary_frames()` alone it looks identical to a person who's actually lotering, and would eventually cross `LOITERING_SECONDS` and fire an alert. `has_moved()` gates loitering eligibility on the track having relocated at least once since it was first seen (`stationary_since_frame != first_seen_frame`). A sign (like the false positive found in the demo) never moves, so it never passes this gate. A real person almost always shifts position within a few seconds of being confirmed, so they are likely to pass the gate and not trigger a false negative.
+**`has_moved()` false positive fixes** A static misdetected object never triggers an anchor reset, so by `stationary_frames()` alone it looks identical to a person who's actually loitering, and would eventually cross `LOITERING_SECONDS` and fire an alert. `has_moved()` gates loitering eligibility on the track having relocated at least once since it was first seen (`stationary_since_frame != first_seen_frame`). A sign (like the false positive found in the demo) never moves, so it never passes this gate. A real person almost always shifts position within a few seconds of being confirmed, so they are likely to pass the gate and not trigger a false negative.
 
 This can't distinguish an always-static object from a real person who happened to be standing still already in the very first frame they were ever observed. That edge case would need a longer observation window or a size/aspect-ratio prior.
 
 `app/main.py`'s websocket loop checks `has_moved(track) and stationary_seconds >= LOITERING_SECONDS` for every confirmed track inside the zone, firing a `loitering`-type alert through `AlertManager`. `Alert`/`AlertManager` gained an `alert_type` field (default `"zone_entry"`, backward compatible) so a `zone_entry` and a `loitering` alert for the same zone+label don't collide on the same Redis cooldown key.
 
-`LOITERING_SECONDS = 10.0` is a hardcoded estimated placeholder.`iou_threshold` and `max_age` were retuned against footage.
+`LOITERING_SECONDS = 10.0` is a hardcoded estimated placeholder. `iou_threshold` and `max_age` were retuned against footage and are now `TUNED_IOU_THRESHOLD`/`TUNED_MAX_AGE` constants in `app/tracker.py`, passed at every call site (`app/main.py`, `scripts/test_video.py`, `scripts/diagnose_fragmentation.py`).
 
 ### Direction-aware entry/exit counting
 
@@ -134,7 +146,7 @@ COCO has no literal `box`/`package`/`parcel` class. `PACKAGE_CLASSES = {"backpac
 
 `PackageMonitor` (`app/alerts.py`) tracks package-class tracks through `left -> taken`: "left" fires once a package has sat stationary in the zone for `PACKAGE_LEFT_SECONDS` and "taken" fires when a previously-flagged package's track is no longer alive. Only "taken" escalates to a real alert (`alert_type="package_taken"`), while "left" stays informational.
 
-Does not gate "left" on `has_moved()` to avoid false negatives from disregarding obscured/existing packages, but allows more oppurtunity for false positives misclassified as the package classes.
+Does not gate "left" on `has_moved()` to avoid false negatives from disregarding obscured/existing packages, but allows more opportunity for false positives misclassified as the package classes.
 
 ### Entryway demo
 
@@ -142,7 +154,7 @@ Does not gate "left" on `has_moved()` to avoid false negatives from disregarding
 
 ### Crowd demo
 
-`results/video/street_tracked.mp4` is kept as a stress test. It's not what this project is made for, due to the busy crowd with many people obscuring eachother. Even after tuning, tight clusters of adjacent people still produce ID swaps when one briefly occludes another (e.g track `#7` -> `#23` mid-clip). This recording predates the Hungarian-assignment and appearance-re-ID work above.
+`results/video/street_tracked.mp4` is kept as a stress test. It's not what this project is made for, due to the busy crowd with many people obscuring each other. Even after tuning, tight clusters of adjacent people still produce ID swaps when one briefly occludes another (e.g track `#7` -> `#23` mid-clip). This recording predates the Hungarian-assignment and appearance-re-ID work above.
 
 ## Benchmark
 
@@ -192,7 +204,7 @@ Full run on Ryzen 5 7520U, all four variants against the real `yolov8n.onnx`:
 | int8_static | 3440 | 226.1 | 314.4 | 4.4 |
 | fp16 | 6312 | 149.7 | 166.7 | 6.7 |
 
-*fp32's absolute number moved from 356ms (the intiial benchmark) to 178ms here on the same CPU model and code in a different session, showing the noise present. Ratios between variants within the same run are what's used to compare rather than the absolute ms.*
+*fp32's absolute number moved from 356ms (the initial benchmark) to 178ms here on the same CPU model and code in a different run, showing the noise present. Ratios between variants within the same run are what's used to compare rather than the absolute ms.*
 
 Both int8 variants were slower than fp32 on this CPU, which is consistent in direction with the initial benchmark, strengthening the idea that this CPU's int8 throughput is less than its fp32 throughput, regardless of which int8 variant.
 
@@ -207,7 +219,7 @@ See `results/benchmark_real_model.csv` for the full real run.
 - **Two detectors behind one interface** (`app/detector.py`): `HogPersonDetector` (OpenCV's built-in HOG+SVM, zero setup) and `OnnxDetector` (real YOLOv8 via onnxruntime), both returning the same `Detection` dataclass and `(detections, elapsed_time)` tuple, swappable via `DETECTOR_BACKEND` env var. A shared `draw_detections()` helper lives next to `Detection` so the box/label drawing style is defined once, not copy-pasted across `scripts/test_video.py`, `/demo/detect`, and anywhere else that needs it.
 - **API key auth on `/demo/detect` and `/ws/detections`**, off by default. Set API_KEY for deployment, local dev needs nothing. HTTP uses an X-API-Key header, the websocket uses a ?api_key=... query param instead, since browser WebSocket clients have no way to set custom headers at all. Both compare with secrets.compare_digest, not ==, to avoid a timing side-channel on the secret comparison. Websocket's auth check is the first route dependency so it short circuits before `get_frame_source()` can open a real video source for an unauthorized connection.
 - **Drawing code lives in its own module** (`app/drawing.py`), not inside `detector.py`/`tracker.py`, because `draw_detections()` and `draw_tracks()` are the only things in the codebase that need `cv2`/`numpy` purely for visualization, so tracking's matching logic stays  testable in isolation.
-- **Tracking is a lightweight IoU/centroid greedy matcher** not a heavier learned tracker.
+- **Tracking is a lightweight IoU/centroid matcher** Hungarian optimal assignment plus a color-histogram appearance signal for occlusion revival, not a heavier learned tracker/re-ID embedding.
 - **Letterbox resize, not stretch-resize**, before feeding frames to the ONNX model the pipeline scales them to fit while preserving aspect ratio, pads the rest with grey, then undoes the scale+pad math on the output boxes. A straight resize would distort people's proportions and hurt accuracy. This is also the root cause of the dense-crowd failure mode above where the whole frame, including every tiny distant person, gets scaled down together.
 - **NMS threshold of 0.45** for collapsing duplicate overlapping boxes for the same person, applied after class-filtering to person-only, vectorized with NumPy rather than a per-box Python loop (8400 candidate boxes per frame would otherwise dwarf the model's own inference time on CPU). This also causes the brief double detection on the entryway demo.
 - **Redis for alert dedup**, via `SET NX EX` giving a 30-second cooldown per zone+label with no separate cleanup job needed, the key expires on its own.
@@ -217,9 +229,10 @@ See `results/benchmark_real_model.csv` for the full real run.
 
 ## Tests
 
-88 tests, `pip install pytest fakeredis && pytest tests/ -v`:
+109 tests, `pip install pytest fakeredis && pytest tests/ -v` (3 of these in `test_detector.py` need a real exported `models/yolov8n.onnx` present):
 - `test_detector.py`: NMS (suppression, survival, empty input, partial overlap below threshold, overlapping classes/labels, OnnxDetector configurable classes)
-- `test_tracker.py`: track confirmation gating (`min_hits`), surviving a one-frame gap under the same ID, expiry after `max_age` consecutive misses, two well-separated tracks not swapping IDs, a track's label/confidence reflecting the real matched detection rather than a placeholder, `stationary_frames`/`has_moved`, and `alive_track_ids()` across unconfirmed/gapped/expired tracks
+- `test_tracker.py`: track confirmation gating (`min_hits`), surviving a one-frame gap under the same ID, expiry after `max_age` consecutive misses, two well-separated tracks not swapping IDs, a track's label/confidence reflecting the real matched detection rather than a placeholder, `stationary_frames`/`has_moved`, `alive_track_ids()` across unconfirmed/gapped/expired tracks, and Hungarian producing a strictly better assignment than greedy on a constructed competing-tracks case
+- `test_appearance.py`: histogram distance for same-vs-different-color boxes, clipping/cropping edge cases (out-of-frame, zero-area, partially-out-of-frame), and missing-descriptor handling always losing against a real one
 - `test_alerts.py`: `Zone.overlaps_box`'s four separation directions plus edge-touching, `AlertManager`'s cooldown/dedup logic via `fakeredis` (including per-`alert_type` cooldown separation), and `EntryExitCounter`'s entry/exit/no-event/pruning/multi-track cases and `PackageMonitor's` left/taken state machine
 - `test_main.py`: FastAPI route coverage (`/health`, `/alerts/recent`) via `TestClient`, API-key auth on `/demo/detect` and websocket, plus integration tests through the websocket route: a detection crossing the zone firing an alert and landing in `/alerts/recent` (`test_alert_full_pipeline`), loitering firing/not-firing for a moving-then-still vs always-static track, and entry/exit events + occupancy counts firing correctly for a track walking into and out of the zone, a package being detected and taken properly
 - `test_check_accuracy.py`: `bootstrap_ci()` degenerate cases collapsing to exactly zero-width CIs (single image or all images identical), the point estimate being the real aggregate independent of seed/resample count, agreement with an independent non-vectorized reference implementation, a wider sample producing a tighter interval, and the zero-denominator resample edge case resolving to 0.0 instead of crashing, that `corruption_fn` hook alters the frame before detection
@@ -265,5 +278,5 @@ This is a benchmarking harness and an alerting service, not an on-device deploym
 - alert history is just whatever's in Redis's bounded list, nothing persisted long term
 - single camera only right now
 - zone is still a computed default (`default_zone_for_resolution`), not yet user-configurable per camera. It's correct across resolutions but a real deployment would want this drawn by a user in a setup UI, not any default at all
-- dense-crowd scenes are still a limitation. Hungarian assignment + appearance re-ID (color-histogram based) have been built, tested, and wired into the real pipeline to target this, but a learned re-ID embedding (DeepSORT-style) is next if the lightweight color-histogram approach is insufficient
+- dense-crowd scenes are still a limitation. Hungarian assignment gave a real but small measured improvement (1 of 144 death events changed verdict on real footage). Color-histogram appearance re-ID was built, wired in, and validated against real footage, but lacked discriminative power on this crowd's clothing/lighting (measured distance distribution, background-bleed hypothesis tested and disproven). A learned re-ID embedding (DeepSORT-style) is the next step.
 - tiled/sliding-window inference for dense-crowd detection (as opposed to tracking) also not yet tried
