@@ -29,6 +29,46 @@ def centroid(box):
     return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
 
 
+def match_deaths_to_births(death_events, birth_events, max_frames=REASSOC_MAX_FRAMES, max_dist=REASSOC_MAX_DIST) -> list[dict]:
+    """For each death, decide whether a nearby birth is is a respawn of the same track.
+    Closest pairs first matching."""
+    candidates = [] # (distance, death_index, birth_index)
+    for di, (_died_id, death_frame, death_box) in enumerate(death_events):
+        dc = centroid(death_box)
+        for bi, (_born_id, birth_frame, birth_box) in enumerate(birth_events):
+            if death_frame < birth_frame <= death_frame + max_frames:
+                dist = math.dist(dc, centroid(birth_box))
+                if dist <= max_dist:
+                    candidates.append((dist, di, bi))
+    candidates.sort(key=lambda c: c[0])
+
+    matched_birth_for_death: dict[int, tuple[int, float]] = {}
+    claimed_births: set[int] = set()
+    for dist, di, bi in candidates:
+        if di in matched_birth_for_death or bi in claimed_births:
+            continue
+        matched_birth_for_death[di] = (bi, dist)
+        claimed_births.add(bi)
+
+    rows = []
+    for di, (died_id, death_frame, _death_box) in enumerate(death_events):
+        match = matched_birth_for_death.get(di)
+        if match is None:
+            rows.append({
+                "died_id": died_id, "death_frame": death_frame, "reassociated": False,
+                "born_id": None, "birth_frame": None, "gap_frames": None, "distance_px": None,
+            })
+            continue
+        bi, dist = match
+        born_id, birth_frame, _birth_box = birth_events[bi]
+        rows.append({
+            "died_id": died_id, "death_frame": death_frame, "reassociated": True,
+            "born_id": born_id, "birth_frame": birth_frame, "gap_frames": birth_frame - death_frame,
+            "distance_px": round(dist, 1),
+        })
+    return rows
+
+
 def run_fragmentation_analysis(match_fn, out_csv: str, revival_csv: str) -> dict:
     """Runs the full detect -> track -> fragmentation-check pipeline once,
     using the given matching function. Returns summary stats so a caller
@@ -67,29 +107,8 @@ def run_fragmentation_analysis(match_fn, out_csv: str, revival_csv: str) -> dict
 
     cap.release()
 
-    plausible = 0
-    rows = []
-    for died_id, death_frame, death_box in death_events:
-        dc = centroid(death_box)
-        best_born_id, best_birth_frame, best_dist = None, None, None
-        for born_id, birth_frame, birth_box in birth_events:
-            if death_frame < birth_frame <= death_frame + REASSOC_MAX_FRAMES:
-                dist = math.dist(dc, centroid(birth_box))
-                if dist <= REASSOC_MAX_DIST and (best_dist is None or dist < best_dist):
-                    best_born_id, best_birth_frame, best_dist = born_id, birth_frame, dist
-
-        flagged = best_born_id is not None
-        if flagged:
-            plausible += 1
-        rows.append({
-            "died_id": died_id,
-            "death_frame": death_frame,
-            "reassociated": flagged,
-            "born_id": best_born_id,
-            "birth_frame": best_birth_frame,
-            "gap_frames": (best_birth_frame - death_frame) if flagged else None,
-            "distance_px": round(best_dist, 1) if flagged else None,  # type: ignore
-        })
+    rows = match_deaths_to_births(death_events, birth_events)
+    plausible = sum(1 for r in rows if r["reassociated"])
 
     os.makedirs("results", exist_ok=True)
     if rows:
