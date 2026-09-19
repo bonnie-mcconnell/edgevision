@@ -49,7 +49,7 @@ Two annotated real-image spot checks are included: (`results/examples/`): `bus.j
 
 - **Zero detections on extremely dense crowd photos:** Uploading a wide festival-crowd photo (hundreds of people, each only a few pixels tall after the model's 640x640 letterbox resize) to `/demo/detect` returns no boxes at all. This is because single-shot detectors like YOLO lose the ability to detect objects below a certain pixel footprint, and is why dedicated crowd-counting models exist (density estimation rather than per-instance boxes). To improve crowded image detection, use tiled/sliding-window inference, in which you split the image into overlapping crops, detect per crop, and merge results, rather than downscaling the whole frame at once.
 
-Full annotated video output: `results/video/street_annotated.mp4`, generated via `python -m scripts.test_video` against a free, licensed street-scene clip (["A bustling day with pedestrians crossing a vibrant city street"](https://www.pexels.com/video/people-walking-on-the-street-3552510/) by Marc Van den Broeck, Pexels License). 
+Full annotated video (reproduce it yourself with `python -m scripts.test_video`): [`street_annotated.mp4`](https://www.pexels.com/video/people-walking-on-the-street-3552510/) source clip ("A bustling day with pedestrians crossing a vibrant city street" by Marc Van den Broeck, Pexels License).
 
 ### Live-view latency
 
@@ -150,11 +150,11 @@ Does not gate "left" on `has_moved()` to avoid false negatives from disregarding
 
 ### Entryway demo
 
-`results/video/entryway_tracked.mp4` (source: ["Delivery man delivering order"](https://www.pexels.com/video/delivery-man-delivering-order-6667223/) by Kampus Production, Pexels License). Track ID stays stable throughout the clip. Frames 41-47 (~0.28s) briefly show two overlapping tracks for the same person, due to detector producing two candidate boxes for one person with insufficient IoU overlap for NMS threshold to merge them. This self-corrects in 7 frames.
+Ran against a source clip (["Delivery man delivering order"](https://www.pexels.com/video/delivery-man-delivering-order-6667223/) by Kampus Production, Pexels License) via `python -m scripts.test_video`. Track ID stays stable throughout the clip. Frames 41-47 (~0.28s) briefly show two overlapping tracks for the same person, due to detector producing two candidate boxes for one person with insufficient IoU overlap for NMS threshold to merge them. This self-corrects in 7 frames.
 
 ### Crowd demo
 
-`results/video/street_tracked.mp4` is kept as a stress test. It's not what this project is made for, due to the busy crowd with many people obscuring each other. Even after tuning, tight clusters of adjacent people still produce ID swaps when one briefly occludes another (e.g track `#7` -> `#23` mid-clip). This recording predates the Hungarian-assignment and appearance-re-ID work above.
+The street clip above is also kept as a stress test. It's not what this project is made for, due to the busy crowd with many people obscuring each other. Even after tuning, tight clusters of adjacent people still produce ID swaps when one briefly occludes another (e.g track `#7` -> `#23` mid-clip). This recording predates the Hungarian-assignment and appearance-re-ID work above.
 
 ## Benchmark
 
@@ -213,6 +213,10 @@ Both int8 variants were slower than fp32 on this CPU, which is consistent in dir
 **fp16 was faster here (1.19x)** However, this comparison has a confound in that unlike the other three variants which are all derived from the same plain ONNX export via `quantize_dynamic_int8`/`quantize_static`, the fp16 model came from Ultralytics' native export pipeline (`yolo export ... quantize=True`) after `onnxconverter_common`'s post-hoc conversion was found to be broken for this architecture. ONNX's validator rejects converting `Resize`'s scale input to fp16, and the library's boundary-Cast insertion around a correctly-blocked `Resize` is broken for this specific graph. The native export pipeline also ran `onnxslim` (operator fusion, redundant-node elimination) as part of exporting, which the other three variants never received. So this 1.19x is a result of fp16-export-plus-graph-optimization together, not fp16 precision in isolation. This benchmark supports the idea that the natively fp16-exported model was faster, not that fp16 precision helped.Disentangling them would require benchmarking an `onnxslim`-optimized fp32 model too.
 
 See `results/benchmark_real_model.csv` for the full real run.
+
+## Edge hardware context
+
+Every number above ran unconstrained (`onnxruntime`'s default of one thread per physical core on machine it ran on), which answers how fast this model is on a laptop, not how fast it would be on camera. Security camera SoCs tend to have 1-4 cores, so `scripts/benchmark.py --threads N` can be used to appproximate that by pinning `onnxruntime` to N intra-op threads instead of letting it use every available core. Even with this, this project is still thread-count-limited CPU inference because it uses `CPUExecutionProvider`.
 
 ## Architecture / design decisions
 

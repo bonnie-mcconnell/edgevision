@@ -2,6 +2,7 @@
 
     python scripts/benchmark.py
     python scripts/benchmark.py --model models/yolov8n.onnx --input-size 640 --out results/benchmark_real_model.csv
+    python scripts/benchmark.py --threads 2 --out results/benchmark_2thread.csv   # approximate a weak edge core count
 """
 
 import argparse
@@ -49,8 +50,21 @@ def preprocess_for_static_quant(fp32_path: str, preprocessed_path: str) -> None:
     quant_pre_process(fp32_path, preprocessed_path)
 
 
-def benchmark_model(model_path: str, input_shape: tuple) -> dict:
-    session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+def benchmark_model(model_path: str, input_shape: tuple, threads: int | None = None) -> dict:
+    """
+    threads=None uses onnxruntime's default (typically one thread per
+    physical core on the machine running it). Real edge SoCs typically 
+    have 1-4 weak cores, so a number measured with threads=None tells you 
+    how fast this model is on this machine, not on the hardware a deployed 
+    camera would actually run. Passing --threads N constrains onnxruntime to 
+    N threads so the numbers can be used to evaluate performance for a 
+    resource-constrained target.
+    """
+    sess_options = ort.SessionOptions()
+    if threads is not None:
+        sess_options.intra_op_num_threads = threads
+        sess_options.inter_op_num_threads = 1
+    session = ort.InferenceSession(model_path, sess_options=sess_options, providers=["CPUExecutionProvider"])
     input_info = session.get_inputs()[0]
     input_name = input_info.name
     # detect input type from model's input info so it works on yolov8n & demo
@@ -72,6 +86,7 @@ def benchmark_model(model_path: str, input_shape: tuple) -> dict:
 
     latencies = np.array(latencies) * 1000  # -> ms
     return {
+        "threads": threads if threads is not None else "default",
         "file_size_kb": os.path.getsize(model_path) / 1024,
         "mean_latency_ms": float(np.mean(latencies)),
         "p95_latency_ms": float(np.percentile(latencies, 95)),
@@ -114,6 +129,11 @@ def parse_args() -> argparse.Namespace:
                          help="Path to an already fp16-exported model (e.g. `yolo export model=yolov8n.pt "
                               "format=onnx half=True`), used instead of post-hoc fp32->fp16 conversion via "
                               "convert_to_fp16().")
+    parser.add_argument("--threads", type=int, default=None,
+                         help="Constrain onnxruntime to this many intra-op threads, to approximate a "
+                              "resource-constrained edge target (e.g. --threads 2 or --threads 1) instead "
+                              "of using every core on this machine. Omit for onnxruntime's default "
+                              "(one thread per physical core)")
     return parser.parse_args()
 
 
@@ -171,7 +191,7 @@ def main() -> None:
     rows = []
     for name, path in variants:
         print(f"Benchmarking {name}...")
-        result = benchmark_model(path, input_shape)
+        result = benchmark_model(path, input_shape, threads=args.threads)
         rows.append({"variant": name, **result})
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
