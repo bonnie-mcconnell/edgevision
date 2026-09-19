@@ -5,7 +5,7 @@
   <title>EdgeVision - live view</title>
   <style>
     body { background: #111; color: #eee; font-family: monospace; text-align: center; }
-    canvas { border: 2px solid #444; margin-top: 12px; }
+    canvas { border: 2px solid #444; margin-top: 12px; max-width: 100%; height: auto; }
     #alert-banner {
       font-size: 24px; font-weight: bold; color: #ff4444;
       height: 32px; visibility: hidden;
@@ -45,9 +45,14 @@
         return;
       }
 
+      if (data.frame_width && data.frame_height && (canvas.width !== data.frame_width || canvas.height != data.frame_height)) {
+        canvas.width = data.frame_width;
+        canvas.height = data.frame_height;
+      }
+
       const img = new Image();
       img.onload = () => {
-        // draw the camera frame first
+        // draw the camera frame first at its native size
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
         if (data.zone) { // read from servers payload

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import logging
 import os
 import base64
 import time
@@ -19,6 +20,12 @@ from app.dependencies import get_alert_manager, get_detector, get_redis_client, 
 from app.detector import HogPersonDetector, OnnxDetector
 from app.drawing import draw_detections
 from app.tracker import Tracker, centroid_max_dist_for_resolution, stationary_move_threshold_for_resolution, TUNED_IOU_THRESHOLD, TUNED_MAX_AGE
+
+logger = logging.getLogger(__name__)
+
+
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024 # 8 MB
+MAX_CONSECUTIVE_DETECTOR_FAILURES = 10
 
 
 @asynccontextmanager
@@ -75,7 +82,10 @@ async def demo_detect(
 ):
     """Post an image to this endpoint, get back detections as JSON or an annotated image."""
     t0 = time.perf_counter()
-    im_bytes = await file.read()
+    im_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(im_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1204 *1024)}MB limit")
+    
     im_arr = np.frombuffer(im_bytes, dtype=np.uint8)
     frame = cv2.imdecode(im_arr, cv2.IMREAD_COLOR)
     if frame is None:
@@ -109,7 +119,7 @@ async def demo_detect(
     t3 = time.perf_counter()
     timing["draw_and_encode_ms"] = round((t3-t2) * 1000, 2)
 
-    print(f"/demo/detect timing: {timing}") # visible server side even for image response, which doesn't have JSON body
+    logger.info("/demo/detect timing: %s", timing) # visible server side even for image response, which doesn't have JSON body
     return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
 
@@ -143,6 +153,7 @@ async def websocket_detections(
         zone = default_zone_for_resolution(frame_width, frame_height)
         entry_exit_counter = EntryExitCounter()
         package_monitor = PackageMonitor()
+        consecutive_detector_failures = 0
 
         while True:
             read_start = time.perf_counter()
@@ -153,9 +164,18 @@ async def websocket_detections(
 
             try:
                 detections, elapsed_s = detector.detect(frame)
+                consecutive_detector_failures = 0
             except Exception as e:
-                print(f"detector error on frame, skipping: {e}")
+                consecutive_detector_failures += 1
+                logger.warning("detector error on frame, skipping (%d/%d consecutive): %s",
+                               consecutive_detector_failures, MAX_CONSECUTIVE_DETECTOR_FAILURES, e)
+                if consecutive_detector_failures >= MAX_CONSECUTIVE_DETECTOR_FAILURES:
+                    await websocket.send_json({"error": "detector failed repeatedly, closing stream"})
+                    break
+
+                await asyncio.sleep(0.01) 
                 continue
+
             detect_done = time.perf_counter()
 
             tracks = tracker.update(detections, frame=frame)
@@ -164,29 +184,36 @@ async def websocket_detections(
             crossing_events = entry_exit_counter.update(tracks, zone, tracker.alive_track_ids())
             package_events = package_monitor.update(tracks, zone, tracker, fps, tracker.alive_track_ids())
 
+            # if redis is down log it and skip alerting for this frame
             fired_alerts = []
-            for pkg_event in package_events:
-                if pkg_event["event"] == "taken":
-                    taken_alert = alert_manager.raise_if_new(
-                        zone.name, pkg_event["label"], pkg_event["confidence"], alert_type="package_taken"
-                    )
-                    if taken_alert:
-                        fired_alerts.append(taken_alert.to_dict())
-            for track in tracks:
-                if zone.overlaps_box(*track.box):
-                    alert = alert_manager.raise_if_new(zone.name, track.label, track.confidence, alert_type="zone_entry")
-                    if alert:
-                        fired_alerts.append(alert.to_dict())
-
-                    stationary_seconds = tracker.stationary_frames(track) / fps
-                    if tracker.has_moved(track) and stationary_seconds >= LOITERING_SECONDS:
-                        loiter_alert = alert_manager.raise_if_new(
-                            zone.name, track.label, track.confidence, alert_type="loitering"
+            try: 
+                for pkg_event in package_events:
+                    if pkg_event["event"] == "taken":
+                        taken_alert = alert_manager.raise_if_new(
+                            zone.name, pkg_event["label"], pkg_event["confidence"], alert_type="package_taken"
                         )
-                        if loiter_alert:
-                            fired_alerts.append(loiter_alert.to_dict())
+                        if taken_alert:
+                            fired_alerts.append(taken_alert.to_dict())
+                for track in tracks:
+                    if zone.overlaps_box(*track.box):
+                        alert = alert_manager.raise_if_new(zone.name, track.label, track.confidence, alert_type="zone_entry")
+                        if alert:
+                            fired_alerts.append(alert.to_dict())
+
+                        stationary_seconds = tracker.stationary_frames(track) / fps
+                        if tracker.has_moved(track) and stationary_seconds >= LOITERING_SECONDS:
+                            loiter_alert = alert_manager.raise_if_new(
+                                zone.name, track.label, track.confidence, alert_type="loitering"
+                            )
+                            if loiter_alert:
+                                fired_alerts.append(loiter_alert.to_dict())
+            except Exception as e:
+                logger.warning("alert manager error, skipping alerting for this frame: %s", e)
+                fired_alerts = []
 
             payload = {
+                "frame_width": frame_width,
+                "frame_height": frame_height,
                 "detections": [
                     {
                         "track_id": t.track_id, "label": t.label, "confidence": t.confidence, "box": list(t.box),

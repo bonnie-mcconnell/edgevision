@@ -13,10 +13,8 @@ the same webcam device.
 
 import cv2
 
-from app.alerts import Zone
+from app.alerts import default_zone_for_resolution
 
-# Keep this in sync with DEFAULT_ZONE in app/main.py
-ZONE = Zone(name="front_door", x1=200, y1=0, x2=440, y2=480)
 OUT_PATH = "preview.jpg"
 
 
@@ -24,6 +22,14 @@ def main() -> None:
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise SystemExit("Couldn't open webcam (index 0)")
+
+    # Computed the same way app/main.py does for a real connection so
+    # preview stays accurate regardless of your webcam's actual resolution.
+    frame_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    frame_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    ZONE = default_zone_for_resolution(frame_width, frame_height)
+    print(f"Webcam resolution: {frame_width:.0f}x{frame_height:.0f}, zone: "
+          f"x1={ZONE.x1} y1={ZONE.y1} x2={ZONE.x2} y2={ZONE.y2}")
 
     print(f"Saving snapshots to {OUT_PATH}. Open it in Photos and keep it open -")
     print("re-open/refresh after each capture to see your latest position.")

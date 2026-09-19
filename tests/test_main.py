@@ -47,6 +47,22 @@ class FakeFrameSource:
         return 0
 
 
+class FailingDetector:
+    """Always raises, to exercise the websocket loop's failure-cap path."""
+    def detect(self, frame):
+        raise RuntimeError("simulated detector failure")
+
+
+class FailingAlertManager:
+    """Same interface as AlertManager but raise_if_new always raises, to
+    simulate Redis being unreachable mid-stream."""
+    def raise_if_new(self, *args, **kwargs):
+        raise ConnectionError("simulated redis outage")
+
+    def recent_alerts(self, limit=20):
+        return []
+
+
 class FakeMovingThenStillDetector:
     """Moves once early, then holds still."""
     def __init__(self):
@@ -423,6 +439,75 @@ def test_websocket_unauthorized_connection_never_opens_video_source(monkeypatch)
         assert tracking_factory.was_called is False
     finally:
         main_module.app.dependency_overrides.clear()
+
+
+def test_websocket_payload_includes_frame_dimensions(client):
+    """live.html needs these to size its canvas to the source resolution
+    instead of assuming a fixed 640x480."""
+    with client.websocket_connect("/ws/detections") as ws:
+        data = ws.receive_json()
+        assert data["frame_width"] == 640
+        assert data["frame_height"] == 480
+
+
+def test_demo_detect_rejects_oversized_upload(client):
+    oversized = b"0" * (main_module.MAX_UPLOAD_BYTES + 1)
+    response = client.post(
+        "/demo/detect",
+        files={"file": ("big.jpg", oversized, "image/jpeg")},
+        params={"format": "json"},
+    )
+    assert response.status_code == 413
+
+
+def test_demo_detect_accepts_upload_at_the_limit(client):
+    # exactly MAX_UPLOAD_BYTES of garbage isn't a decodable image, but it
+    # should get past the size check and fail at decode (400), not 413
+    at_limit = b"0" * main_module.MAX_UPLOAD_BYTES
+    response = client.post(
+        "/demo/detect",
+        files={"file": ("big.jpg", at_limit, "image/jpeg")},
+        params={"format": "json"},
+    )
+    assert response.status_code == 400
+
+
+def test_websocket_stops_after_repeated_detector_failures(monkeypatch):
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    shared_alert_manager = AlertManager(fake_redis, cooldown_seconds=30)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    # more frames than the failure cap, so the loop must give up on its own
+    num_frames = main_module.MAX_CONSECUTIVE_DETECTOR_FAILURES + 20
+
+    main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: shared_alert_manager
+    main_module.app.dependency_overrides[deps.get_detector] = lambda: FailingDetector()
+    main_module.app.dependency_overrides[deps.get_frame_source] = lambda: FakeFrameSource([frame] * num_frames)
+
+    try:
+        with TestClient(main_module.app) as test_client:
+            with test_client.websocket_connect("/ws/detections") as ws:
+                data = ws.receive_json()
+                assert "error" in data  # server tells the client, doesn't just go silent
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+
+def test_websocket_keeps_streaming_detections_when_alerting_fails(client, monkeypatch):
+    """If the alert backend (Redis) errors, detections should keep flowing as
+    alerting is secondary and shouldn't take the whole stream down with it."""
+    main_module.app.dependency_overrides[deps.get_alert_manager] = lambda: FailingAlertManager()
+
+    with client.websocket_connect("/ws/detections") as ws:
+        # tracks need min_hits consecutive matched frames before they confirm
+        # and show up in data["detections"], so read every frame the fake
+        # source produces, not just the first
+        seen_detection = False
+        for _ in range(3):
+            data = ws.receive_json()
+            if data["detections"]:
+                seen_detection = True
+            assert data["alerts"] == []  # alerting failed silently-to-the-user, but didn't crash the stream
+        assert seen_detection
 
 
 def test_websocket_accepts_connection_with_correct_api_key(monkeypatch):
