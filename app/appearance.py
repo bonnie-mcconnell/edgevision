@@ -40,7 +40,7 @@ def appearance_descriptor(frame: np.ndarray, box: tuple[float, float, float, flo
     y1, y2 = y1 + margin_y, y2 - margin_y
 
     if x2 <= x1 or y2 <= y1:
-            return None
+        return None
 
     region = frame[y1:y2, x1:x2]
     hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)

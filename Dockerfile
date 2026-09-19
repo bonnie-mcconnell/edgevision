@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir ultralytics
 RUN yolo export model=yolov8n.pt format=onnx imgsz=640
 
-# runtime stage: what actually gets deployed2
+# runtime stage: what actually gets deployed
 FROM python:3.12-slim
 
 # libgl1 + libglib2.0 are needed for opencv's video decode even in headless mode

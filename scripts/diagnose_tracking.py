@@ -69,10 +69,11 @@ def main() -> None:
 
     cap.release()
 
-    with open(OUT_CSV, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
+    if rows:
+        with open(OUT_CSV, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
 
     print(f"wrote {len(rows)} rows to {OUT_CSV}")
 
